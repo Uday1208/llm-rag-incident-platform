@@ -1,0 +1,78 @@
+name: Build & Push API Gateway to ACR
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [ "main" ]
+    paths:
+      - "apps/api-gateway/**"
+      - ".github/workflows/build-push-api-gateway.yml"
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute tag
+        id: tag
+        run: |
+          if [ -z "${{ secrets.IMAGE_TAG }}" ]; then
+            echo "tag=prod-$(date +%Y%m%d-%H%M)" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ secrets.IMAGE_TAG }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker-container
+
+      - name: Login to ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.ACR_LOGIN_SERVER }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build & push API Gateway (no cache)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./apps/api-gateway
+          file: ./apps/api-gateway/Dockerfile
+          push: true
+          tags: ${{ secrets.ACR_LOGIN_SERVER }}/api-gateway:${{ steps.tag.outputs.tag }}
+          provenance: false
+          sbom: false
+
+      # -------------------------------------------------------------------
+      # (Later) Build & push RAG Worker
+      # - Uncomment after rag-worker has a Dockerfile & code
+      # -------------------------------------------------------------------
+      # - name: Build & push RAG Worker (no cache)
+      #   uses: docker/build-push-action@v6
+      #   with:
+      #     context: ./apps/rag-worker
+      #     file: ./apps/rag-worker/Dockerfile
+      #     push: true
+      #     tags: ${{ secrets.ACR_LOGIN_SERVER }}/rag-worker:${{ steps.tag.outputs.tag }}
+      #     provenance: false
+      #     sbom: false
+
+      # -------------------------------------------------------------------
+      # (Later) Build & push TorchServe model service
+      # - Uncomment after ts-model has a Dockerfile & model artifacts
+      # -------------------------------------------------------------------
+      # - name: Build & push TorchServe (no cache)
+      #   uses: docker/build-push-action@v6
+      #   with:
+      #     context: ./apps/ts-model
+      #     file: ./apps/ts-model/Dockerfile
+      #     push: true
+      #     tags: ${{ secrets.ACR_LOGIN_SERVER }}/ts-model:${{ steps.tag.outputs.tag }}
+      #     provenance: false
+      #     sbom: false
