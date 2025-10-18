@@ -33,6 +33,16 @@ class Settings(BaseSettings):
     MAX_CONTEXT_CHARS: int = 3000
     TOP_K_DEFAULT: int = 5
 
+    # ...existing...
+    USE_LANGCHAIN_STORE: bool = False  # toggle LC vector store
+    LC_COLLECTION: str = "documents_lc"  # table/collection name for LC store
+
+    # Optional: buildable SQLAlchemy URL (LangChain needs this)
+    @property
+    def PG_SQLALCHEMY_URL(self) -> str:
+        """Return SQLAlchemy URL for pgvector (psycopg2)."""
+        return f"postgresql+psycopg2://{self.PG_USER}:{self.PG_PASS}@{self.PG_HOST}/{self.PG_DB}"
+
     class Config:
         env_file = ".env"
         case_sensitive = True
