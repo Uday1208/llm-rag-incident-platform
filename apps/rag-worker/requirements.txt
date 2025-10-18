@@ -14,6 +14,7 @@ tenacity==8.2.3
 
 # RAG/ML
 sentence-transformers==2.2.2
+huggingface_hub==0.24.6
 transformers==4.36.2
 torch==2.1.0
 langchain==0.0.352   # keep the late-2023 monolith to match our pinned set
