@@ -17,6 +17,7 @@ sentence-transformers==2.2.2
 transformers==4.36.2
 torch==2.1.0
 langchain==0.0.352   # keep the late-2023 monolith to match our pinned set
+sqlalchemy==2.0.23   # Add SQLAlchemy for LangChain’s PGVector driver
 
 # Observability & logging
 prometheus-client==0.17.1
