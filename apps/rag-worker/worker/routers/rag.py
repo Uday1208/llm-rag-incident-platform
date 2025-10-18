@@ -4,18 +4,18 @@ Purpose: RAG endpoint with LC or raw pgvector retrieval based on USE_LANGCHAIN_S
 """
 
 from fastapi import APIRouter, HTTPException
-from ..schemas.rag import RAGRequest, RAGResponse
+'''from ..schemas.rag import RAGRequest, RAGResponse
 from ..embeddings import embed_texts
 from ..repository import search_by_embedding
 from ..repository_lc import search_by_query as lc_search_by_query
 from ..rag import compose_answer
-from ..config import settings
-'''from worker.schemas.rag import RAGRequest, RAGResponse
+from ..config import settings'''
+from worker.schemas.rag import RAGRequest, RAGResponse
 from worker.embeddings import embed_texts
 from worker.repository import search_by_embedding
 from worker.repository_lc import search_by_query as lc_search_by_query
 from worker.rag import compose_answer
-from worker.config import settings'''
+from worker.config import settings
 
 router = APIRouter()
 
