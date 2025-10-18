@@ -4,7 +4,7 @@ Purpose: Configure structured JSON logging for production observability.
 """
 
 import logging
-from python_json_logger import jsonlogger
+from pythonjsonlogger import jsonlogger
 from .config import settings
 
 def configure_logging() -> None:
