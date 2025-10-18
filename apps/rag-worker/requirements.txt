@@ -1,16 +1,24 @@
 fastapi==0.103.2
 uvicorn==0.23.2
 pydantic==1.10.13
-langchain==0.0.352
-sentence-transformers==2.2.2
-transformers==4.36.2
+
+# Core data/DB
 psycopg2-binary==2.9.9
 pgvector==0.2.4
+numpy==1.26.4
+
+# Caching & HTTP
 redis==5.0.1
 httpx==0.24.1
-prometheus-client==0.17.1
-opentelemetry-sdk==1.21.0
-opentelemetry-instrumentation-fastapi==0.42b0
-opentelemetry-exporter-otlp==1.21.0
 tenacity==8.2.3
+
+# RAG/ML
+sentence-transformers==2.2.2
+transformers==4.36.2
+torch==2.1.0
+langchain==0.0.352   # keep the late-2023 monolith to match our pinned set
+sqlalchemy==2.0.23   # Add SQLAlchemy for LangChain’s PGVector driver
+
+# Observability & logging
+prometheus-client==0.17.1
 python-json-logger==2.0.7
