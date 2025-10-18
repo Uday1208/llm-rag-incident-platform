@@ -5,11 +5,16 @@ Purpose: Batch ingest/upsert documents into vector store; toggles LC vs raw repo
 
 from fastapi import APIRouter, HTTPException
 from typing import List, Tuple
-from ..schemas.ingest import IngestRequest, IngestResponse
+'''from ..schemas.ingest import IngestRequest, IngestResponse
 from ..embeddings import embed_texts
 from ..repository import upsert_documents
 from ..repository_lc import upsert_texts as upsert_texts_lc
-from ..config import settings
+from ..config import settings'''
+from worker.schemas.ingest import IngestRequest, IngestResponse
+from worker.embeddings import embed_texts
+from worker.repository import upsert_documents
+from worker.repository_lc import upsert_texts as upsert_texts_lc
+from worker.config import settings
 
 router = APIRouter()
 
