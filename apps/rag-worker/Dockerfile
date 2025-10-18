@@ -3,7 +3,8 @@ FROM python:3.10-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app        # <-- add this
 
 # System deps (minimal)
 RUN apt-get update && apt-get install -y --no-install-recommends \
