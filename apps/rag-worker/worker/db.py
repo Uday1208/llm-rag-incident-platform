@@ -60,7 +60,7 @@ async def ensure_schema(app: FastAPI) -> None:
         source TEXT,
         ts TIMESTAMPTZ,
         content TEXT NOT NULL,
-        embedding VECTOR(384) NOT NULL
+        embedding {settings.VECTOR_SQLTYPE} NOT NULL
     );
     CREATE INDEX IF NOT EXISTS documents_embedding_idx
       ON documents USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);

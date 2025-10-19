@@ -29,6 +29,7 @@ class Settings(BaseSettings):
 
     # Embeddings / LLM
     EMBED_MODEL_NAME: str = "sentence-transformers/all-MiniLM-L6-v2"  # 384-dim
+    EMBED_DIM: int = 384  # <-- configurable (set 768 for e5-base, etc.)
     MODEL_ID: str = ""  # optional transformers generation model; if empty => no generation
     MAX_CONTEXT_CHARS: int = 3000
     TOP_K_DEFAULT: int = 5
@@ -42,6 +43,13 @@ class Settings(BaseSettings):
     def PG_SQLALCHEMY_URL(self) -> str:
         """Return SQLAlchemy URL for pgvector (psycopg2)."""
         return f"postgresql+psycopg2://{self.PG_USER}:{self.PG_PASS}@{self.PG_HOST}/{self.PG_DB}"
+
+    # Convenience: SQL type for pgvector
+    @property
+    def VECTOR_SQLTYPE(self) -> str:
+        """Return pgvector SQL type string for the configured dimension."""
+        # safe: int comes from env validation
+        return f"vector({int(self.EMBED_DIM)})"
 
     class Config:
         env_file = ".env"
