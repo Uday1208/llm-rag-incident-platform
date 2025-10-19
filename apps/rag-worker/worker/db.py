@@ -54,7 +54,7 @@ def get_conn():
 
 async def ensure_schema(app: FastAPI) -> None:
     """Create documents table and ivfflat index if not present."""
-    ddl = """
+    ddl = f"""
     CREATE TABLE IF NOT EXISTS documents (
         id TEXT PRIMARY KEY,
         source TEXT,
