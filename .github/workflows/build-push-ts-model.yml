@@ -1,28 +1,71 @@
-# ... existing preamble, checkout, etc.
+name: Build & Push TS Model to ACR
 
-# Build the TorchServe MAR into apps/ts-model/model-store/log_anom.mar
-- name: Build TorchServe MAR
-  working-directory: apps/ts-model
-  run: |
-    pip install torchserve==0.9.0 torch-model-archiver==0.9.0
-    mkdir -p model-store
-    torch-model-archiver \
-      --model-name log_anom \
-      --version $GITHUB_RUN_NUMBER \
-      --handler handlers/log_anom_handler.py \
-      --extra-files mar.properties \
-      --export-path model-store \
-      --force
-    ls -l model-store/
+on:
+  workflow_dispatch: {}
+  push:
+    branches:
+      - main
+      - main-ts-model
+    paths:
+      - apps/ts-model/**
+      - .github/workflows/build-push-ts-model.yml
 
-# Prefetch SentenceTransformers model into a local folder included in Docker context
-- name: Prefetch embedding model cache
-  working-directory: apps/ts-model
-  run: |
-    pip install sentence-transformers==2.2.2
-    # Put cache in a deterministic folder INSIDE the repo, so Docker COPY can see it
-    export SENTENCE_TRANSFORMERS_HOME="$PWD/model-cache"
-    mkdir -p "$SENTENCE_TRANSFORMERS_HOME"
-    python -c "import os; print('SENTENCE_TRANSFORMERS_HOME:', os.environ.get('SENTENCE_TRANSFORMERS_HOME')); from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2'); print('Model downloaded into cache.')"
-    echo "Cached files:"
-    ls -la model-cache || true
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Build the TorchServe MAR into apps/ts-model/model-store/log_anom.mar
+      - name: Build TorchServe MAR
+        working-directory: apps/ts-model
+        run: |
+          python -m pip install --upgrade pip
+          pip install torchserve==0.9.0 torch-model-archiver==0.9.0
+          mkdir -p model-store
+          torch-model-archiver \
+            --model-name log_anom \
+            --version $GITHUB_RUN_NUMBER \
+            --handler handlers/log_anom_handler.py \
+            --extra-files mar.properties \
+            --export-path model-store \
+            --force
+          ls -l model-store/
+
+      # Prefetch Sentence-Transformers model into apps/ts-model/model-cache/
+      - name: Prefetch embedding model cache
+        working-directory: apps/ts-model
+        run: |
+          pip install sentence-transformers==2.2.2
+          export SENTENCE_TRANSFORMERS_HOME="$PWD/model-cache"
+          mkdir -p "$SENTENCE_TRANSFORMERS_HOME"
+          python -c "import os; print('SENTENCE_TRANSFORMERS_HOME:', os.environ.get('SENTENCE_TRANSFORMERS_HOME')); from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2'); print('Model downloaded into cache.')"
+          ls -la model-cache || true
+
+      - name: Compute tag
+        id: tag
+        run: echo "tag=prod-$(date +%Y%m%d-%H%M)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.ACR_LOGIN_SERVER }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build & Push TS Model Image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./apps/ts-model
+          file: ./apps/ts-model/Dockerfile
+          push: true
+          tags: ${{ secrets.ACR_LOGIN_SERVER }}/ts-model:${{ steps.tag.outputs.tag }}
+          provenance: false
+          sbom: false
