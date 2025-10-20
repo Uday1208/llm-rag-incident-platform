@@ -40,7 +40,7 @@ jobs:
       - name: Prefetch embedding model cache
         working-directory: apps/ts-model
         run: |
-          pip install --only-binary=:all: sentence-transformers==2.2.2 transformers==4.36.2 tokenizers==0.14.1 huggingface_hub==0.14.1
+          pip install --only-binary=:all: sentence-transformers==3.0.1 transformers==4.41.2 tokenizers==0.19.1 huggingface_hub==0.23.2
           export SENTENCE_TRANSFORMERS_HOME="$PWD/model-cache"
           mkdir -p "$SENTENCE_TRANSFORMERS_HOME"
           python -c "import os; print('SENTENCE_TRANSFORMERS_HOME:', os.environ.get('SENTENCE_TRANSFORMERS_HOME')); from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2'); print('Model downloaded into cache.')"
