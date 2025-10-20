@@ -17,14 +17,14 @@ RUN chmod +x pack_model.sh && ./pack_model.sh  # produces model-store/log_anom.m
 FROM pytorch/torchserve:0.9.0-cpu
 WORKDIR /home/model-server
 
-# Copy TorchServe config and the built MAR
 COPY config.properties /home/model-server/config.properties
 COPY --from=builder /build/model-store/ /home/model-server/model-store/
-# Copy handler too (not required for runtime, but useful for introspection)
 COPY handlers/ /home/model-server/handlers/
 
-# Install runtime deps for handler (match builder pins)
-RUN pip install --no-cache-dir sentence-transformers==2.2.2 transformers==4.36.2
+# Runtime deps for handler
+RUN pip install --no-cache-dir sentence-transformers==2.2.2 transformers==4.36.2 \
+ && apt-get update && apt-get install -y --no-install-recommends curl \
+ && rm -rf /var/lib/apt/lists/*
 
 ENV EMBED_MODEL_NAME=sentence-transformers/all-MiniLM-L6-v2 \
     ANOMALY_THRESHOLD=0.7
@@ -33,9 +33,4 @@ EXPOSE 8082 8083 8084
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
   CMD curl -f http://127.0.0.1:8083/ping || exit 1
 
-# Start TorchServe with our model loaded in foreground (so PID=TS)
-CMD ["torchserve","--start",
-     "--model-store","/home/model-server/model-store",
-     "--models","log_anom=log_anom.mar",
-     "--ts-config","/home/model-server/config.properties",
-     "--foreground"]
+CMD ["torchserve","--start","--model-store","/home/model-server/model-store","--models","log_anom=log_anom.mar","--ts-config","/home/model-server/config.properties","--foreground"]
