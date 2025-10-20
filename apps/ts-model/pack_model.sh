@@ -20,12 +20,10 @@ echo "MODEL_STORE:  $MODEL_STORE"
 echo "ART_DIR:      $ART_DIR"
 echo "SER_FILE:     ${SER_FILE:-<none>}"
 echo "EXTRA:        $EXTRA"
-echo "Listing dirs:"
-ls -la "$THIS_DIR"
 ls -la "$MODEL_STORE" || true
 ls -la "$ART_DIR" || true
 
-# Use module form to avoid PATH issues with torch-model-archiver
+# Use module form to avoid PATH issues
 python -m torch_model_archiver \
   --model-name log_anom \
   --version 1.0 \
