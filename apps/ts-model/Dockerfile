@@ -2,15 +2,14 @@
 FROM pytorch/torchserve:0.9.0-cpu AS builder
 WORKDIR /build
 
-# Install any Python deps your handler needs beyond base image
-# (sentence-transformers pulls in transformers + tokenizers)
 RUN pip install --no-cache-dir sentence-transformers==2.2.2 transformers==4.36.2
 
-# Copy only what’s needed to build the MAR (better cache hit)
 COPY handlers/ ./handlers/
 COPY mar.properties ./mar.properties
 COPY pack_model.sh ./pack_model.sh
-COPY model-artifacts/ ./model-artifacts/
+
+# ensure dir exists even if empty
+RUN mkdir -p model-artifacts
 RUN chmod +x pack_model.sh && ./pack_model.sh  # produces model-store/log_anom.mar
 
 # ===== Stage 2: runtime
