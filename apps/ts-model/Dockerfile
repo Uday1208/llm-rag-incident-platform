@@ -13,7 +13,7 @@ COPY model-store/      /home/model-server/model-store/
 COPY model-cache/      /home/model-server/model-cache/
 
 # IMPORTANT: install deps into TorchServe's interpreter so workers can import them
-RUN /home/venv/bin/pip install --no-cache-dir --only-binary=:all: sentence-transformers==2.2.2 transformers==4.36.2 tokenizers==0.14.1 huggingface_hub==0.14.1
+RUN /home/venv/bin/pip install --no-cache-dir --only-binary=:all: sentence-transformers==3.0.1 transformers==4.41.2 tokenizers==0.19.1 huggingface_hub==0.23.2
 
 # Tell sentence-transformers where to find the cache we copied
 ENV SENTENCE_TRANSFORMERS_HOME=/home/model-server/model-cache \
