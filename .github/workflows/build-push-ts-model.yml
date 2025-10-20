@@ -23,13 +23,6 @@
     # Put cache in a deterministic folder INSIDE the repo, so Docker COPY can see it
     export SENTENCE_TRANSFORMERS_HOME="$PWD/model-cache"
     mkdir -p "$SENTENCE_TRANSFORMERS_HOME"
-    python - <<'PY'
-import os
-from sentence_transformers import SentenceTransformer
-home = os.environ.get("SENTENCE_TRANSFORMERS_HOME")
-print("SENTENCE_TRANSFORMERS_HOME:", home)
-SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-print("Model downloaded into cache.")
-PY
+    python -c "import os; print('SENTENCE_TRANSFORMERS_HOME:', os.environ.get('SENTENCE_TRANSFORMERS_HOME')); from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2'); print('Model downloaded into cache.')"
     echo "Cached files:"
     ls -la model-cache || true
