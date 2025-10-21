@@ -56,7 +56,13 @@ async def query(req: Request, body: QueryRequest) -> Any:
             if isinstance(scores, list) and scores:
                 anomaly_signal = float(sum(scores) / len(scores))'''
             from services.ts_client import score_lines
-            lines = rag.get("contexts", [])[:50] if isinstance(rag.get("contexts"), list) else []
+            raw_ctx = rag.get("contexts") or []
+            if not isinstance(raw_ctx, list):
+                raw_ctx = []
+            lines = [
+                (ctx.get("content", "") if isinstance(ctx, dict) else str(ctx))
+                for ctx in raw_ctx
+            ][:50]  # keep payload small
             anomaly_signal = await score_lines(lines)
         except Exception:
             # Soft-fail: keep main answer even if TS is unavailable
