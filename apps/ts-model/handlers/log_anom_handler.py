@@ -40,18 +40,50 @@ class LogAnomHandler(BaseHandler):
         else:
             self.head = None  # fallback path (heuristic)
 
-    def preprocess(self, data):
-        """Parse HTTP payload -> list[str] log lines."""
+        def preprocess(self, data):
+        """Extract list[str] 'lines' from TorchServe request (supports body or data)."""
         if not data:
             return []
-        # TorchServe batches requests; we only look at first item body by convention
-        body = data[0].get("body")
-        if isinstance(body, (bytes, bytearray)):
-            body = body.decode("utf-8")
-        if isinstance(body, str):
-            body = json.loads(body)
-        lines = body.get("lines", [])
-        lines = [str(x) for x in lines]
+
+        entry = data[0] or {}
+        raw = entry.get("body")
+        if raw is None:
+            raw = entry.get("data")
+
+        # bytes -> str
+        if isinstance(raw, (bytes, bytearray)):
+            try:
+                raw = raw.decode("utf-8")
+            except Exception:
+                raw = ""
+
+        payload = None
+        if isinstance(raw, str):
+            s = raw.strip()
+            if s.startswith("{") and s.endswith("}"):
+                try:
+                    import json
+                    payload = json.loads(s)
+                except Exception as e:
+                    self.logger.warning("JSON parse failed: %s; raw=%r", e, s[:200])
+            elif s:
+                payload = {"lines": [s]}
+        elif isinstance(raw, dict):
+            payload = raw
+        if not isinstance(payload, dict):
+            payload = {}
+
+        lines = payload.get("lines") or []
+        if isinstance(lines, (str, bytes, bytearray)):
+            lines = [lines.decode("utf-8") if isinstance(lines, (bytes, bytearray)) else lines]
+        elif isinstance(lines, list):
+            lines = [
+                (x.decode("utf-8") if isinstance(x, (bytes, bytearray)) else str(x))
+                for x in lines
+            ]
+        else:
+            lines = []
+
         return lines
 
     @torch.no_grad()
