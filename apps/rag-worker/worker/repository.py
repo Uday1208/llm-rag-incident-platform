@@ -6,7 +6,7 @@ Purpose: Data access layer for documents (upsert, search).
 from typing import Iterable, List, Tuple
 from .db import get_conn, has_cosine_operator
 from .instrumentation import DB_TIME
-
+from .config import settings  # ensures settings.VECTOR_SQLTYPE like "vector(384)"
 
 def _to_pyfloats(vec: Iterable) -> list[float]:
     """Convert any numeric iterable (e.g., numpy) into plain Python floats."""
@@ -17,7 +17,7 @@ def upsert_documents(rows: Iterable[Tuple[str, str, str, str, list]]) -> int:
     """Upsert documents: (id, source, ts_iso, content, embedding)."""
     sql = """
     INSERT INTO documents (id, source, ts, content, embedding)
-    VALUES (%s, %s, %s, %s, %s)
+    VALUES (%s, %s, %s, %s, CAST(%s AS {settings.VECTOR_SQLTYPE}))
     ON CONFLICT (id) DO UPDATE
       SET source    = EXCLUDED.source,
           ts        = EXCLUDED.ts,
@@ -37,7 +37,7 @@ def search_by_embedding(query_vec: list[float], top_k: int) -> List[Tuple[str, s
     qv = _to_pyfloats(query_vec)
     if has_cosine_operator():
         sql = """
-        SELECT id, content, (1 - (embedding <=> %s)) AS sim
+        SELECT id, content, (1 - (embedding <=> CAST(%s AS {settings.VECTOR_SQLTYPE}))) AS sim
         FROM documents
         ORDER BY embedding <=> %s
         LIMIT %s;
