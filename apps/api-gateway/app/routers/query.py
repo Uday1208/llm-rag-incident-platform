@@ -48,13 +48,16 @@ async def query(req: Request, body: QueryRequest) -> Any:
     anomaly_signal = None
     if settings.TS_MODEL_URL:
         try:
-            # pick a few retrieved context snippets if present
+            '''# pick a few retrieved context snippets if present
             lines = rag.get("contexts", [])[:10] if isinstance(rag.get("contexts"), list) else []
             ts = await call_ts_score(http, lines)
             # expect {"scores":[...]} → reduce to a single signal (mean)
             scores = ts.get("scores")
             if isinstance(scores, list) and scores:
-                anomaly_signal = float(sum(scores) / len(scores))
+                anomaly_signal = float(sum(scores) / len(scores))'''
+            from services.ts_client import score_lines
+            lines = rag.get("contexts", [])[:50] if isinstance(rag.get("contexts"), list) else []
+            anomaly_signal = await score_lines(lines)
         except Exception:
             # Soft-fail: keep main answer even if TS is unavailable
             anomaly_signal = None
