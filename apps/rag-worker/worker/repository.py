@@ -39,7 +39,7 @@ def search_by_embedding(query_vec: list[float], top_k: int) -> List[Tuple[str, s
         sql = """
         SELECT id, content, (1 - (embedding <=> CAST(%s AS {settings.VECTOR_SQLTYPE}))) AS sim
         FROM documents
-        ORDER BY embedding <=> %s
+        ORDER BY embedding <=> CAST(%s AS {settings.VECTOR_SQLTYPE})
         LIMIT %s;
         """
         params = (qv, qv, int(top_k))
