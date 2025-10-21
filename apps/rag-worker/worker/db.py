@@ -1,72 +1,83 @@
 """
 File: db.py
-Purpose: psycopg2 connection pool with pgvector registration; schema management helpers.
+Purpose: DB connection utilities + pgvector schema bootstrap and capability checks.
 """
 
+import os
 import psycopg2
-from psycopg2 import pool
-from pgvector.psycopg2 import register_vector
-from fastapi import FastAPI
 from contextlib import contextmanager
-from time import time
-from .config import settings
-from .instrumentation import DB_TIME
+from .instrumentation import DB_TIME  # metrics histogram/timer
 
-_pool: pool.SimpleConnectionPool | None = None
+# Build DSN from env (PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD, PG_SSLMODE)
+PG_DSN = (
+    f"host={os.getenv('PGHOST')} "
+    f"port={os.getenv('PGPORT', '5432')} "
+    f"dbname={os.getenv('PGDATABASE')} "
+    f"user={os.getenv('PGUSER')} "
+    f"password={os.getenv('PGPASSWORD')} "
+    f"sslmode={os.getenv('PG_SSLMODE', 'require')}"
+)
 
-async def init_db_pool(app: FastAPI) -> None:
-    """Initialize global psycopg2 connection pool."""
-    global _pool
-    _pool = psycopg2.pool.SimpleConnectionPool(
-        minconn=settings.PG_POOL_MIN,
-        maxconn=settings.PG_POOL_MAX,
-        host=settings.PG_HOST,
-        dbname=settings.PG_DB,
-        user=settings.PG_USER,
-        password=settings.PG_PASS,
-        sslmode=settings.PG_SSLMODE,
-    )
-    # register pgvector type on a test connection
-    conn = _pool.getconn()
-    try:
-        register_vector(conn)
-    finally:
-        _pool.putconn(conn)
-    app.state.db_pool = _pool
+# Vector dimension (must match embeddings you store)
+VECTOR_DIM = int(os.getenv("VECTOR_DIM", "384"))
 
-async def close_db_pool(app: FastAPI) -> None:
-    """Close global psycopg2 connection pool."""
-    global _pool
-    if _pool:
-        _pool.closeall()
-        _pool = None
+# Cached capability probe
+_HAS_COSINE = None
+
 
 @contextmanager
 def get_conn():
-    """Yield a pooled psycopg2 connection with pgvector registered."""
-    assert _pool is not None, "DB pool not initialized"
-    conn = _pool.getconn()
+    """Yield a psycopg2 connection with pgvector adapter registered."""
+    with DB_TIME.labels(route="connect").time():
+        conn = psycopg2.connect(PG_DSN)
     try:
-        register_vector(conn)
+        # Ensure Python list[float] binds as pgvector (not numeric[])
+        try:
+            from pgvector.psycopg2 import register_vector
+            register_vector(conn)
+        except Exception:
+            pass
         yield conn
     finally:
-        _pool.putconn(conn)
+        conn.close()
 
-async def ensure_schema(app: FastAPI) -> None:
-    """Create documents table and ivfflat index if not present."""
-    ddl = f"""
-    CREATE TABLE IF NOT EXISTS documents (
-        id TEXT PRIMARY KEY,
-        source TEXT,
-        ts TIMESTAMPTZ,
-        content TEXT NOT NULL,
-        embedding {settings.VECTOR_SQLTYPE} NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS documents_embedding_idx
-      ON documents USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
-    """
+
+def ensure_schema():
+    """Create pgvector extension, documents table and IVFFlat index (idempotent)."""
+    sqls = [
+        "CREATE EXTENSION IF NOT EXISTS vector;",
+        f"""
+        CREATE TABLE IF NOT EXISTS documents (
+          id        TEXT PRIMARY KEY,
+          source    TEXT,
+          ts        TIMESTAMPTZ,
+          content   TEXT NOT NULL,
+          embedding VECTOR({VECTOR_DIM}) NOT NULL
+        );
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_documents_embedding "
+        "ON documents USING ivfflat (embedding vector_cosine_ops);",
+    ]
     with DB_TIME.labels(route="schema").time():
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(ddl)
+        with get_conn() as conn, conn.cursor() as cur:
+            for s in sqls:
+                cur.execute(s)
             conn.commit()
+
+
+def has_cosine_operator() -> bool:
+    """Return True if '<=> (vector,vector)' exists on this server (pgvector >=0.5)."""
+    global _HAS_COSINE
+    if _HAS_COSINE is not None:
+        return _HAS_COSINE
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT 1
+            FROM pg_operator
+            WHERE oprname = '<=>'
+              AND oprleft = 'vector'::regtype
+              AND oprright = 'vector'::regtype
+            LIMIT 1;
+        """)
+        _HAS_COSINE = bool(cur.fetchone())
+    return _HAS_COSINE
