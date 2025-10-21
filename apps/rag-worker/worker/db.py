@@ -49,8 +49,8 @@ def _new_connection() -> psycopg2.extensions.connection:
     return conn
 
 
-def init_db_pool() -> None:
-    """Initialize a global connection pool (idempotent)."""
+def init_db_pool(app: object = None) -> None:
+    """Initialize a global connection pool (idempotent). Accepts optional app for compatibility."""
     global _POOL
     if _POOL is None:
         with DB_TIME.labels(route="pool_init").time():
@@ -60,8 +60,8 @@ def init_db_pool() -> None:
         pass
 
 
-def close_db_pool() -> None:
-    """Close and clear the global pool."""
+def close_db_pool(app: object = None) -> None:
+    """Close and clear the global pool. Accepts optional app for compatibility."""
     global _POOL
     if _POOL is not None:
         _POOL.closeall()
@@ -88,7 +88,7 @@ def get_conn():
             conn.close()
 
 
-def ensure_schema() -> None:
+def ensure_schema(app: object = None) -> None:
     """Create pgvector extension, documents table, and IVFFlat index (idempotent)."""
     sqls = [
         "CREATE EXTENSION IF NOT EXISTS vector;",
