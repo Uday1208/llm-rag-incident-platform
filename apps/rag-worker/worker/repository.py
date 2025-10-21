@@ -8,6 +8,8 @@ from .db import get_conn, has_cosine_operator
 from .instrumentation import DB_TIME
 from .config import settings  # ensures settings.VECTOR_SQLTYPE like "vector(384)"
 
+VEC_TYPE = settings.VECTOR_SQLTYPE
+
 def _to_pyfloats(vec: Iterable) -> list[float]:
     """Convert any numeric iterable (e.g., numpy) into plain Python floats."""
     return [float(x) for x in vec]
@@ -15,9 +17,9 @@ def _to_pyfloats(vec: Iterable) -> list[float]:
 
 def upsert_documents(rows: Iterable[Tuple[str, str, str, str, list]]) -> int:
     """Upsert documents: (id, source, ts_iso, content, embedding)."""
-    sql = """
+    sql = f"""
     INSERT INTO documents (id, source, ts, content, embedding)
-    VALUES (%s, %s, %s, %s, CAST(%s AS {settings.VECTOR_SQLTYPE}))
+    VALUES (%s, %s, %s, %s, CAST(%s AS {VEC_TYPE}))
     ON CONFLICT (id) DO UPDATE
       SET source    = EXCLUDED.source,
           ts        = EXCLUDED.ts,
@@ -36,10 +38,10 @@ def search_by_embedding(query_vec: list[float], top_k: int) -> List[Tuple[str, s
     """Return (id, content, similarity) top_k using pgvector NN search."""
     qv = _to_pyfloats(query_vec)
     if has_cosine_operator():
-        sql = """
-        SELECT id, content, (1 - (embedding <=> CAST(%s AS {settings.VECTOR_SQLTYPE}))) AS sim
+        sql = f"""
+        SELECT id, content, (1 - (embedding <=> CAST(%s AS {VEC_TYPE}))) AS sim
         FROM documents
-        ORDER BY embedding <=> CAST(%s AS {settings.VECTOR_SQLTYPE})
+        ORDER BY embedding <=> CAST(%s AS {VEC_TYPE})
         LIMIT %s;
         """
         params = (qv, qv, int(top_k))
