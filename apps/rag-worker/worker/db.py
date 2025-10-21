@@ -12,11 +12,11 @@ from .instrumentation import DB_TIME  # histogram/timer
 
 # Build DSN from env
 PG_DSN = (
-    f"host={os.getenv('PGHOST')} "
-    f"port={os.getenv('PGPORT', '5432')} "
-    f"dbname={os.getenv('PGDATABASE')} "
-    f"user={os.getenv('PGUSER')} "
-    f"password={os.getenv('PGPASSWORD')} "
+    f"host={os.getenv('PG_HOST')} "
+    f"port={os.getenv('PG_PORT', '5432')} "
+    f"dbname={os.getenv('PG_DB')} "
+    f"user={os.getenv('PG_USER')} "
+    f"password={os.getenv('PG_PASS')} "
     f"sslmode={os.getenv('PG_SSLMODE', 'require')}"
 )
 
