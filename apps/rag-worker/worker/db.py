@@ -15,7 +15,7 @@ from .instrumentation import DB_TIME
 PGHOST = os.getenv("PG")  # host name
 PGUSER = os.getenv("PG_USER")
 PGPASSWORD = os.getenv("PG_PASS")
-PGDB = os.getenv("PG_DB_NAME")
+PGDB = os.getenv("PG_DB")
 PGPORT = os.getenv("PG_PORT", "5432")
 PG_SSLMODE = os.getenv("PG_SSLMODE", "require")
 
