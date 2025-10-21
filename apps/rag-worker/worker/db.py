@@ -25,7 +25,7 @@ from psycopg2.pool import SimpleConnectionPool
 from .instrumentation import DB_TIME  # Prometheus histogram/timer
 
 # -------- Azure env-style variables (kept exactly as in your repo) --------
-PGHOST = os.getenv("PG")                   # Postgres host
+PGHOST = os.getenv("PG_HOST")                   # Postgres host
 PGUSER = os.getenv("PG_USER")              # Postgres user
 PGPASSWORD = os.getenv("PG_PASS")          # Postgres password
 PGDB = os.getenv("PG_DB")             # Postgres database name
