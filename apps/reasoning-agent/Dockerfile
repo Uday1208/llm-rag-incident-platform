@@ -25,7 +25,7 @@ RUN pip install --no-cache-dir \
 #   sentence-transformers==2.2.2
 
 # Copy only the app
-COPY ./apps/reasoning-agent /app
+COPY . /app
 
 # Non-root
 RUN useradd -m svc && chown -R svc:svc /app
