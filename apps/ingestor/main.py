@@ -35,7 +35,7 @@ import httpx
 from fastapi import FastAPI
 from pydantic import BaseModel
 from prometheus_client import Counter, Histogram, generate_latest
-from python_json_logger import jsonlogger
+from pythonjsonlogger import jsonlogger
 
 from azure.eventhub.aio import EventHubConsumerClient
 from azure.storage.blob import BlobServiceClient
