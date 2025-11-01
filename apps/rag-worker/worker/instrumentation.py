@@ -36,6 +36,10 @@ DB_TIME = Histogram(
     ["route"],
 )
 
+# --- Back-compat aliases so existing imports keep working ---
+REQUESTS = REQ_COUNTER  # legacy name used by main.py
+LATENCY  = DB_TIME      # legacy name used by main.py
+
 # Embedding timing (wrap model.encode with: with EMBED_TIME.labels(phase="encode").time(): ...)
 EMBED_TIME = Histogram(
     "embed_seconds",
