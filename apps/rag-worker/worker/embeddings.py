@@ -1,10 +1,12 @@
 """
 File: embeddings.py
-Purpose: Compute sentence embeddings with optional Redis caching (resilient).
+Purpose: Compute sentence embeddings with optional Redis caching; expose
+         lifecycle helpers used by main.py (init_embedder/close_embedder).
+
 Notes:
-- Reads configuration from .config.settings (no os.getenv here).
-- Uses Redis with keepalive/retry; cache failures do NOT fail requests.
-- Each function includes a one-liner explaining its role.
+- Reads configuration from .config.settings.
+- Redis client uses keepalive/retry; cache failures never fail requests.
+- Each function includes a one-liner for quick understanding.
 """
 
 from __future__ import annotations
@@ -29,7 +31,6 @@ from redis.exceptions import (
 # Project imports
 from .config import settings
 from .instrumentation import CACHE_HITS, CACHE_MISSES, CACHE_ERRORS, EMBED_TIME
-
 
 # -----------------------
 # Settings (from .config)
@@ -63,6 +64,8 @@ _REDIS_DB       = _i("REDIS_DB", 0)
 _REDIS_SSL      = _b("REDIS_SSL", True)
 _REDIS_TTL      = _i("REDIS_TTL_SEC", 86400) # 1 day
 
+# Optional small warmup to avoid first-hit latency (kept off by default)
+_WARM_EMBED_ON_START = _b("WARM_EMBED_ON_START", False)
 
 # -----------------------
 # Singletons
@@ -87,14 +90,14 @@ def _get_redis() -> Optional[Redis]:
     if not _REDIS_HOST:
         return None
 
-    # ---- Client options (resilient & production-friendly) ----
+    # Resilient client options
     _redis = Redis(
         host=_REDIS_HOST,
         port=_REDIS_PORT,
         password=_REDIS_PASSWORD,
         db=_REDIS_DB,
         ssl=_REDIS_SSL,
-        decode_responses=False,                # store packed float32 bytes
+        decode_responses=False,  # store packed float32 bytes
         socket_keepalive=True,
         health_check_interval=30,
         socket_connect_timeout=5,
@@ -123,7 +126,6 @@ def _unpack(buf: bytes) -> np.ndarray:
 async def _cache_get(r: Redis, key: bytes) -> Optional[bytes]:
     """Return cached bytes or None; swallow transient Redis errors."""
     try:
-        # (requested) wrap GET in try/except and count errors
         return await r.get(key)
     except (ConnectionError, TimeoutError, AuthenticationError, RedisError):
         CACHE_ERRORS.labels(kind="get").inc()
@@ -133,7 +135,6 @@ async def _cache_get(r: Redis, key: bytes) -> Optional[bytes]:
 async def _cache_setex(r: Redis, key: bytes, ttl: int, val: bytes) -> None:
     """Set cached bytes with TTL; ignore transient Redis errors."""
     try:
-        # (requested) wrap SETEX in try/except and count errors
         await r.setex(key, ttl, val)
     except (ConnectionError, TimeoutError, AuthenticationError, RedisError):
         CACHE_ERRORS.labels(kind="set").inc()
@@ -141,7 +142,7 @@ async def _cache_setex(r: Redis, key: bytes, ttl: int, val: bytes) -> None:
 
 
 async def embed_texts(texts: List[str]) -> List[List[float]]:
-    """Return embeddings for input texts, using cache when available and never failing on cache blips."""
+    """Return embeddings for input texts using cache when available; never fail on cache blips."""
     model = _get_model()
     r = _get_redis()
 
@@ -199,3 +200,44 @@ async def embed_texts(texts: List[str]) -> List[List[float]]:
 
     # 4) Return Python lists
     return [c.astype(np.float32).tolist() for c in cached]
+
+
+# -----------------------
+# Lifecycle hooks (expected by main.py)
+# -----------------------
+
+async def init_embedder(app=None) -> None:
+    """Initialize embedder resources at startup (model + optional Redis warm check)."""
+    # Ensure model is instantiated (may trigger lazy load from local cache)
+    _ = _get_model()
+
+    # Optionally do a tiny warmup encode to avoid first-hit latency
+    if _WARM_EMBED_ON_START:
+        try:
+            with EMBED_TIME.labels(phase="encode").time():
+                _ = await asyncio.to_thread(
+                    _.encode, ["warmup"], normalize_embeddings=True
+                )
+        except Exception:
+            # Warmup is best-effort; do not block startup
+            pass
+
+    # Best-effort Redis ping so first GET doesn’t race with handshake
+    r = _get_redis()
+    if r is not None:
+        try:
+            await r.ping()
+        except Exception:
+            # Do not fail startup on cache connectivity
+            pass
+
+
+async def close_embedder(app=None) -> None:
+    """Close embedder resources at shutdown (Redis connection)."""
+    global _redis
+    if _redis is not None:
+        try:
+            await _redis.aclose()
+        except Exception:
+            pass
+        _redis = None
