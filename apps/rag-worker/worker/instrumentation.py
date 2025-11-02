@@ -1,6 +1,6 @@
 """
 File: instrumentation.py
-Purpose: Central Prometheus metrics for rag-worker.
+Purpose: Prometheus metrics collectors used across the worker
 
 Exports:
   - REQ_COUNTER(route): count HTTP requests per logical route
@@ -9,82 +9,51 @@ Exports:
   - CACHE_HITS / CACHE_MISSES: counters for embedding cache efficiency
   - CACHE_ERRORS(kind): counter with kind in {"get","set"} for cache failures
 
-Also:
-  - setup_metrics(app): attaches metric objects to app.state.metrics for introspection
 """
 
-#from __future__ import annotations
+from prometheus_client import Counter, Histogram, CollectorRegistry, CONTENT_TYPE_LATEST, generate_latest
 
-from fastapi import FastAPI
-from prometheus_client import Counter, Histogram
+# Single-process default registry is fine for ACA
+REGISTRY = CollectorRegistry(auto_describe=True)
 
-# -------------------------
-# Metric definitions
-# -------------------------
-
-# Count requests by logical route (example routes: "ingest", "rag", "health")
-REQ_COUNTER = Counter(
-    "requests_total",
-    "HTTP requests by logical route",
-    ["route"],
+# Matches middleware usage: REQUESTS.labels(route=..., method=..., status=...)
+REQUESTS = Counter(
+    "http_requests_total",
+    "Total HTTP requests",
+    labelnames=["route", "method", "status"],
+    registry=REGISTRY,
 )
 
-# DB latency per route (wrap DB calls with: with DB_TIME.labels(route="search").time(): ...)
+# Matches middleware usage: LATENCY.labels(route=..., method=...).observe(...)
+LATENCY = Histogram(
+    "http_request_duration_seconds",
+    "HTTP request duration in seconds",
+    labelnames=["route", "method"],
+    buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10),
+    registry=REGISTRY,
+)
+
+# Matches repository/db usage in your code: DB_TIME.labels(route="schema").time(), etc.
 DB_TIME = Histogram(
     "db_seconds",
-    "DB time per route",
-    ["route"],
+    "DB operation durations in seconds",
+    labelnames=["route"],   # IMPORTANT: use 'route' because your code calls labels(route="...")
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2),
+    registry=REGISTRY,
 )
 
-# --- Back-compat aliases so existing imports keep working ---
-REQUESTS = REQ_COUNTER  # legacy name used by main.py
-LATENCY  = DB_TIME      # legacy name used by main.py
-
-# Embedding timing (wrap model.encode with: with EMBED_TIME.labels(phase="encode").time(): ...)
-EMBED_TIME = Histogram(
-    "embed_seconds",
-    "Embedding stages",
-    ["phase"],  # e.g., "encode"
-)
-
-# Cache effectiveness
-CACHE_HITS = Counter(
-    "embed_cache_hits_total",
-    "Embedding cache hits",
-)
-
-CACHE_MISSES = Counter(
-    "embed_cache_misses_total",
-    "Embedding cache misses",
-)
-
-# Cache errors (label `kind` in {"get","set"})
+# Optional cache error counter (only if you reference it; otherwise harmless)
 CACHE_ERRORS = Counter(
-    "embed_cache_errors_total",
-    "Embedding cache errors",
-    ["kind"],
+    "cache_errors_total",
+    "Redis cache errors (get/set)",
+    labelnames=["kind"],  # 'get' or 'set'
+    registry=REGISTRY,
 )
 
-# -------------------------
-# App wiring helper
-# -------------------------
+def setup_metrics(app):
+    """Attach registry to app.state for /metrics endpoint to read."""
+    app.state.prom_registry = REGISTRY
 
-def setup_metrics(app: FastAPI) -> None:
-    """
-    Attach metric objects to app.state.metrics so other modules can introspect
-    without importing symbols directly. Safe to call multiple times.
-    NOTE: All metrics are already registered on the default Prometheus registry.
-    """
-    # Ensure the attribute exists
-    if not hasattr(app.state, "metrics") or not isinstance(getattr(app.state, "metrics"), dict):
-        app.state.metrics = {}
-
-    # Populate/refresh the dictionary
-    app.state.metrics.update({
-        "requests_total": REQ_COUNTER,
-        "db_seconds": DB_TIME,
-        "embed_seconds": EMBED_TIME,
-        "embed_cache_hits_total": CACHE_HITS,
-        "embed_cache_misses_total": CACHE_MISSES,
-        "embed_cache_errors_total": CACHE_ERRORS,
-    })
+def render_metrics():
+    """Return (content_type, payload) for a Starlette/FastAPI Response."""
+    return CONTENT_TYPE_LATEST, generate_latest(REGISTRY)
