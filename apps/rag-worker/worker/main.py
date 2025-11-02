@@ -83,5 +83,5 @@ async def prometheus_mw(request, call_next):
 # ---- routers (unchanged) ----
 app.include_router(health.router,   prefix="",    tags=["system"])
 app.include_router(metrics.router,  prefix="",    tags=["system"])
-app.include_router(ingest.router,   prefix="/v1", tags=["ingest"])
+app.include_router(ingest.router,   prefix="", tags=["ingest"])
 app.include_router(rag.router,      prefix="/v1", tags=["rag"])
