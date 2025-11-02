@@ -1,243 +1,231 @@
 """
 File: embeddings.py
-Purpose: Compute sentence embeddings with optional Redis caching; expose
-         lifecycle helpers used by main.py (init_embedder/close_embedder).
-
+Purpose: Embed text batches with SentenceTransformers + optional Redis cache.
 Notes:
-- Reads configuration from .config.settings.
-- Redis client uses keepalive/retry; cache failures never fail requests.
-- Each function includes a one-liner for quick understanding.
+- Public API (unchanged): init_embedder(app), close_embedder(app), embed_texts(List[str]) -> List[List[float]]
+- Resolves model/redis from module globals OR app.state; lazily initializes as a safety net.
+- Offloads encode to a worker thread; Redis cache is best-effort (never raises to caller).
 """
 
 from __future__ import annotations
-
-import asyncio
+import os
+import logging
 from typing import List, Optional
 
+import anyio
 import numpy as np
-from sentence_transformers import SentenceTransformer
-
-# Redis (async) with resilience
 from redis.asyncio import Redis
-from redis.asyncio.retry import Retry
-from redis.backoff import ExponentialBackoff
 from redis.exceptions import (
-    RedisError,
-    ConnectionError,
-    TimeoutError,
+    ConnectionError as RedisConnError,
+    TimeoutError as RedisTimeout,
     AuthenticationError,
+    RedisError,
 )
 
-# Project imports
-from .config import settings
-from .instrumentation import CACHE_HITS, CACHE_MISSES, CACHE_ERRORS, EMBED_TIME
+log = logging.getLogger("rag-worker.embeddings")
 
-# -----------------------
-# Settings (from .config)
-# -----------------------
-def _s(name: str, default: str) -> str:
-    """Return string config value from settings with a default."""
-    return str(getattr(settings, name, default))
+# ----------------- Configuration -----------------
+EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2").strip()
+EMBED_DIM = int(os.getenv("EMBED_DIM", "384"))          # keep in-sync with pgvector column dim
+EMBED_BATCH = int(os.getenv("EMBED_BATCH", "32"))
+CACHE_TTL_SEC = int(os.getenv("CACHE_TTL_SEC", "3600"))
 
-def _i(name: str, default: int) -> int:
-    """Return int config value from settings with a default."""
-    try:
-        return int(getattr(settings, name, default))
-    except Exception:
-        return int(default)
+REDIS_HOST = os.getenv("REDIS_HOST") or os.getenv("REDIS_HOSTNAME")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD") or os.getenv("REDIS_KEY")
+REDIS_SSL = os.getenv("REDIS_SSL", "false").lower() in ("1", "true", "yes")
 
-def _b(name: str, default: bool) -> bool:
-    """Return bool config value from settings with a default."""
-    val = getattr(settings, name, default)
-    if isinstance(val, bool):
-        return val
-    sval = str(val).strip().lower()
-    return sval in ("1", "true", "yes", "y", "on")
-
-_EMBED_MODEL = _s("EMBED_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2")
-_EMBED_DIM   = _i("EMBED_DIM", 384)
-
-_REDIS_HOST     = _s("REDIS_HOST", "")
-_REDIS_PORT     = _i("REDIS_PORT", 6380)     # Azure Redis often TLS on 6380
-_REDIS_PASSWORD = getattr(settings, "REDIS_PASSWORD", None) or None
-_REDIS_DB       = _i("REDIS_DB", 0)
-_REDIS_SSL      = _b("REDIS_SSL", True)
-_REDIS_TTL      = _i("REDIS_TTL_SEC", 86400) # 1 day
-
-# Optional small warmup to avoid first-hit latency (kept off by default)
-_WARM_EMBED_ON_START = _b("WARM_EMBED_ON_START", False)
-
-# -----------------------
-# Singletons
-# -----------------------
-_model: Optional[SentenceTransformer] = None
+# ----------------- State -----------------
+# Support both module-level state and app.state for maximal compatibility with your existing code
+_model = None             # type: ignore
 _redis: Optional[Redis] = None
+_APP = None               # late-bound FastAPI app (if caller passes it)
 
-
-def _get_model() -> SentenceTransformer:
-    """Return a memoized sentence-transformer model."""
-    global _model
-    if _model is None:
-        _model = SentenceTransformer(_EMBED_MODEL)
+# ----------------- Helpers -----------------
+def _resolve_model():
+    """Return a SentenceTransformer model from globals/app.state, lazily loading if needed."""
+    global _model, _APP
+    if _model is not None:
+        return _model
+    # try app.state if available
+    app = _APP
+    if app is not None:
+        m = getattr(app.state, "embed_model", None)
+        if m is not None:
+            _model = m
+            return _model
+    # last resort: lazy-load (safety net so requests don't crash if init path diverged)
+    from sentence_transformers import SentenceTransformer
+    log.warning("embedder lazy-load: init_embedder() may not have run; loading %s now", EMBED_MODEL_NAME)
+    _model = SentenceTransformer(EMBED_MODEL_NAME)
+    if app is not None:
+        app.state.embed_model = _model
     return _model
 
-
-def _get_redis() -> Optional[Redis]:
-    """Return a memoized Redis client or None if not configured."""
-    global _redis
+def _resolve_redis() -> Optional[Redis]:
+    """Return Redis client from globals/app.state; create lazily if not present."""
+    global _redis, _APP
     if _redis is not None:
         return _redis
-    if not _REDIS_HOST:
+    app = _APP
+    r = getattr(app.state, "embed_redis", None) if app is not None else None
+    if r is not None:
+        _redis = r
+        return _redis
+    if not REDIS_HOST:
         return None
-
-    # Resilient client options
-    _redis = Redis(
-        host=_REDIS_HOST,
-        port=_REDIS_PORT,
-        password=_REDIS_PASSWORD,
-        db=_REDIS_DB,
-        ssl=_REDIS_SSL,
-        decode_responses=False,  # store packed float32 bytes
+    r = Redis(
+        host=REDIS_HOST,
+        port=REDIS_PORT,
+        password=REDIS_PASSWORD,
+        db=0,
+        ssl=REDIS_SSL,
+        # hardened socket options
+        decode_responses=False,
         socket_keepalive=True,
         health_check_interval=30,
         socket_connect_timeout=5,
         socket_timeout=5,
-        retry=Retry(ExponentialBackoff(cap=3, base=0.2), retries=3),
-        retry_on_error=[ConnectionError, TimeoutError],
     )
+    _redis = r
+    if app is not None:
+        app.state.embed_redis = r
     return _redis
 
+# ----------------- Public API -----------------
+async def init_embedder(app) -> None:
+    """Initialize global/app.state model and Redis client (idempotent)."""
+    global _APP, _model, _redis
+    _APP = app
 
-def _cache_key(text: str) -> bytes:
-    """Return a stable cache key for a given text."""
-    return ("emb:" + str(hash(text))).encode("utf-8")
+    # Model
+    if getattr(app.state, "embed_model", None) is None:
+        from sentence_transformers import SentenceTransformer
+        app.state.embed_model = SentenceTransformer(EMBED_MODEL_NAME)
+        log.info("embedder initialized: %s", EMBED_MODEL_NAME)
+    _model = app.state.embed_model
 
+    # Redis (optional)
+    if REDIS_HOST and getattr(app.state, "embed_redis", None) is None:
+        app.state.embed_redis = Redis(
+            host=REDIS_HOST,
+            port=REDIS_PORT,
+            password=REDIS_PASSWORD,
+            db=0,
+            ssl=REDIS_SSL,
+            decode_responses=False,
+            socket_keepalive=True,
+            health_check_interval=30,
+            socket_connect_timeout=5,
+            socket_timeout=5,
+        )
+        try:
+            # best-effort sanity check; non-fatal
+            await app.state.embed_redis.ping()
+            log.info("redis cache connected: host=%s port=%s ssl=%s", REDIS_HOST, REDIS_PORT, REDIS_SSL)
+        except Exception as e:
+            log.warning("redis ping failed (cache disabled this run): %s", e)
+    _redis = getattr(app.state, "embed_redis", None)
 
-def _pack(vec: np.ndarray) -> bytes:
-    """Return a float32 numpy vector packed as bytes."""
-    return vec.astype(np.float32).tobytes(order="C")
+async def close_embedder(app) -> None:
+    """Close Redis connection (model does not need explicit close)."""
+    r: Optional[Redis] = getattr(app.state, "embed_redis", None)
+    if r is not None:
+        try:
+            await r.aclose()
+        except Exception:
+            pass
+        finally:
+            app.state.embed_redis = None
+    # Keep _model resident; no explicit close for SentenceTransformer
 
-
-def _unpack(buf: bytes) -> np.ndarray:
-    """Return a float32 numpy vector unpacked from bytes."""
-    return np.frombuffer(buf, dtype=np.float32)
-
-
-async def _cache_get(r: Redis, key: bytes) -> Optional[bytes]:
-    """Return cached bytes or None; swallow transient Redis errors."""
-    try:
-        return await r.get(key)
-    except (ConnectionError, TimeoutError, AuthenticationError, RedisError):
-        CACHE_ERRORS.labels(kind="get").inc()
-        return None
-
-
-async def _cache_setex(r: Redis, key: bytes, ttl: int, val: bytes) -> None:
-    """Set cached bytes with TTL; ignore transient Redis errors."""
-    try:
-        await r.setex(key, ttl, val)
-    except (ConnectionError, TimeoutError, AuthenticationError, RedisError):
-        CACHE_ERRORS.labels(kind="set").inc()
-        # best-effort cache; do not re-raise
-
-
+# ----------------- Embedding -----------------
 async def embed_texts(texts: List[str]) -> List[List[float]]:
-    """Return embeddings for input texts using cache when available; never fail on cache blips."""
-    model = _get_model()
-    r = _get_redis()
+    """
+    Compute embeddings with caching:
+    - signature preserved: List[str] -> List[List[float]]
+    - encode is offloaded to thread; Redis cache is best-effort
+    - vectors are float32 and forced to EMBED_DIM (pad/trim) for pgvector
+    """
+    # normalize inputs
+    items: List[str] = []
+    for t in texts or []:
+        s = t if isinstance(t, str) else str(t)
+        s = s.strip()
+        if s:
+            items.append(s)
+    if not items:
+        return []
 
-    keys = [_cache_key(t) for t in texts]
-    cached: List[Optional[np.ndarray]] = [None] * len(texts)
+    model = _resolve_model()
+    r = _resolve_redis()
 
-    # 1) Parallel cache lookups (if Redis configured)
+    # derive simple keys (stable enough for our use)
+    try:
+        keys = [f"emb:{len(s)}:{hash(s)}" for s in items]
+    except Exception:
+        keys = [f"emb:{i}" for i in range(len(items))]
+
+    # 1) read-through cache
+    cached: List[Optional[List[float]]] = [None] * len(items)
     if r is not None:
-        async def _g(i: int, k: bytes):
-            buf = await _cache_get(r, k)
-            if not buf:
-                return
+        for i, k in enumerate(keys):
             try:
-                v = _unpack(buf)
-                if v.shape == (_EMBED_DIM,):
-                    cached[i] = v
-            except Exception:
-                cached[i] = None
+                buf = await r.get(k)
+            except (RedisConnError, RedisTimeout, AuthenticationError, RedisError):
+                buf = None
+            if buf:
+                try:
+                    arr = np.frombuffer(buf, dtype=np.float32)
+                    if EMBED_DIM and arr.size == EMBED_DIM:
+                        cached[i] = arr.astype(np.float32).tolist()
+                except Exception:
+                    pass
 
-        await asyncio.gather(*(_g(i, k) for i, k in enumerate(keys)))
+    # 2) encode missing
+    to_idx = [i for i, v in enumerate(cached) if v is None]
+    if not to_idx:
+        return cached  # type: ignore
 
-    # 2) Compute missing embeddings
-    to_compute = [i for i, v in enumerate(cached) if v is None]
-    if to_compute:
-        # metrics
-        try:
-            CACHE_HITS.inc(len(texts) - len(to_compute))
-            CACHE_MISSES.inc(len(to_compute))
-        except Exception:
-            pass
+    to_encode = [items[i] for i in to_idx]
+    batch_size = EMBED_BATCH
 
-        inputs = [texts[i] for i in to_compute]
-        with EMBED_TIME.labels(phase="encode").time():
-            vecs = await asyncio.to_thread(
-                model.encode, inputs, normalize_embeddings=True
-            )  # np.ndarray (N, D)
+    def _encode_block(block: List[str]) -> np.ndarray:
+        arr = model.encode(
+            block,
+            batch_size=batch_size,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+        )
+        return np.asarray(arr, dtype=np.float32)
 
-        for off, idx in enumerate(to_compute):
-            cached[idx] = np.asarray(vecs[off], dtype=np.float32)
+    parts: List[np.ndarray] = []
+    for i in range(0, len(to_encode), batch_size):
+        block = to_encode[i : i + batch_size]
+        arr = await anyio.to_thread.run_sync(_encode_block, block)
+        parts.append(arr)
 
-        # 3) Fire-and-forget cache writes
+    enc = np.concatenate(parts, axis=0) if len(parts) > 1 else parts[0]
+
+    # 3) enforce dimension
+    if EMBED_DIM:
+        d = EMBED_DIM
+        if enc.shape[1] != d:
+            if enc.shape[1] > d:
+                enc = enc[:, :d]
+            else:
+                pad = np.zeros((enc.shape[0], d - enc.shape[1]), dtype=np.float32)
+                enc = np.concatenate([enc, pad], axis=1)
+
+    # 4) fill results + write-through cache
+    ttl = CACHE_TTL_SEC
+    for j, idx in enumerate(to_idx):
+        vec = enc[j]
+        cached[idx] = vec.astype(np.float32).tolist()
         if r is not None:
-            async def _s(i: int):
-                v = cached[i]
-                if v is not None:
-                    await _cache_setex(r, keys[i], _REDIS_TTL, _pack(v))
+            try:
+                await r.setex(keys[idx], ttl, vec.tobytes())
+            except (RedisConnError, RedisTimeout, AuthenticationError, RedisError):
+                pass
 
-            asyncio.create_task(asyncio.gather(*(_s(i) for i in to_compute)))
-    else:
-        # all hits
-        try:
-            CACHE_HITS.inc(len(texts))
-        except Exception:
-            pass
-
-    # 4) Return Python lists
-    return [c.astype(np.float32).tolist() for c in cached]
-
-
-# -----------------------
-# Lifecycle hooks (expected by main.py)
-# -----------------------
-
-async def init_embedder(app=None) -> None:
-    """Initialize embedder resources at startup (model + optional Redis warm check)."""
-    # Ensure model is instantiated (may trigger lazy load from local cache)
-    _ = _get_model()
-
-    # Optionally do a tiny warmup encode to avoid first-hit latency
-    if _WARM_EMBED_ON_START:
-        try:
-            with EMBED_TIME.labels(phase="encode").time():
-                _ = await asyncio.to_thread(
-                    _.encode, ["warmup"], normalize_embeddings=True
-                )
-        except Exception:
-            # Warmup is best-effort; do not block startup
-            pass
-
-    # Best-effort Redis ping so first GET doesn’t race with handshake
-    r = _get_redis()
-    if r is not None:
-        try:
-            await r.ping()
-        except Exception:
-            # Do not fail startup on cache connectivity
-            pass
-
-
-async def close_embedder(app=None) -> None:
-    """Close embedder resources at shutdown (Redis connection)."""
-    global _redis
-    if _redis is not None:
-        try:
-            await _redis.aclose()
-        except Exception:
-            pass
-        _redis = None
+    return cached  # type: ignore

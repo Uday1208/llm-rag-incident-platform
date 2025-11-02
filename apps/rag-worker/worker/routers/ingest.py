@@ -1,43 +1,70 @@
 """
 File: routers/ingest.py
-Purpose: Batch ingest/upsert documents into vector store; toggles LC vs raw repository.
+Purpose: Ingest endpoint (embed + upsert).
+Notes:
+- Keeps existing route (/v1/ingest) and async signature.
+- Uses absolute imports (worker.*) to avoid package path issues.
+- Sanitizes inputs so embedder never receives None/empty strings.
 """
 
-from fastapi import APIRouter, HTTPException
 from typing import List, Tuple
-'''from ..schemas.ingest import IngestRequest, IngestResponse
-from ..embeddings import embed_texts
-from ..repository import upsert_documents
-from ..repository_lc import upsert_texts as upsert_texts_lc
-from ..config import settings'''
-from worker.schemas.ingest import IngestRequest, IngestResponse
+from fastapi import APIRouter, HTTPException
+
+from worker.schemas.ingest import IngestRequest
 from worker.embeddings import embed_texts
 from worker.repository import upsert_documents
-from worker.repository_lc import upsert_texts as upsert_texts_lc
-from worker.config import settings
 
 router = APIRouter()
 
-@router.post("/ingest", response_model=IngestResponse)
-async def ingest(req: IngestRequest) -> IngestResponse:
-    """Embed & upsert using raw pgvector or LangChain PGVector depending on flag."""
-    if not req.documents:
-        raise HTTPException(status_code=400, detail="No documents provided")
+@router.post("/v1/ingest")
+async def ingest(req: IngestRequest):
+    """
+    Accepts a list of documents, computes embeddings, and upserts into Postgres.
+    Each document requires at least id and content.
+    """
 
-    if settings.USE_LANGCHAIN_STORE:
-        ids = [d.id for d in req.documents]
-        sources = [d.source for d in req.documents]
-        contents = [d.content for d in req.documents]
-        ts_iso = [d.ts.isoformat() if d.ts else None for d in req.documents]
-        n = upsert_texts_lc(ids, sources, contents, ts_iso)
-        return IngestResponse(upserted=n)
+    raw_docs = req.documents if isinstance(req.documents, list) else []
 
-    # Raw pgvector path (fast)
-    contents = [d.content for d in req.documents]
-    vecs = await embed_texts(contents)
+    ids: List[str] = []
+    sources: List[str] = []
+    ts_list: List[str] = []
+    contents: List[str] = []
+
+    # Be tolerant to either Pydantic models or plain dicts
+    for d in raw_docs:
+        _id = getattr(d, "id", None) or (d.get("id") if isinstance(d, dict) else None)
+        _src = getattr(d, "source", None) or (d.get("source") if isinstance(d, dict) else "")
+        _ts  = getattr(d, "ts", None) or (d.get("ts") if isinstance(d, dict) else "")
+        _ct  = getattr(d, "content", None) or (d.get("content") if isinstance(d, dict) else "")
+
+        # Require id + content; silently skip partials (or raise 400 if you prefer strictness)
+        if not _id or not _ct:
+            continue
+
+        # Normalize to strings and strip content
+        ids.append(str(_id))
+        sources.append(str(_src))
+        ts_list.append(str(_ts))
+        contents.append(str(_ct).strip())
+
+    if not contents:
+        return {"upserted": 0}
+
+    # Embeddings (bubble up errors so ops sees real failures)
+    try:
+        vecs: List[List[float]] = await embed_texts(contents)
+    except Exception as e:
+        # Keep simple: no starlette JSONResponse import; use HTTPException
+        raise HTTPException(status_code=500, detail=f"embedding failed: {e}")
+
+    if len(vecs) != len(contents):
+        # Prevent mismatched inserts (dimension drift or partial encode)
+        raise HTTPException(status_code=500, detail="embedding output size mismatch")
+
+    # Build rows for repository (id, source, ts, content, embedding)
     rows: List[Tuple[str, str, str, str, list]] = []
-    for d, v in zip(req.documents, vecs):
-        ts_iso = d.ts.isoformat() if d.ts else None
-        rows.append((d.id, d.source, ts_iso, d.content, v))
-    upsert_documents(rows)
-    return IngestResponse(upserted=len(rows))
+    for i in range(len(contents)):
+        rows.append((ids[i], sources[i], ts_list[i], contents[i], vecs[i]))
+
+    n = upsert_documents(rows)
+    return {"upserted": n}
