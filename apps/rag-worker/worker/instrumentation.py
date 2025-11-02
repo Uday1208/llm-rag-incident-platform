@@ -1,6 +1,6 @@
 """
 File: instrumentation.py
-Purpose: Prometheus metrics collectors used across the worker
+Purpose: Prometheus metrics used across worker.
 
 Exports:
   - REQ_COUNTER(route): count HTTP requests per logical route
@@ -9,51 +9,52 @@ Exports:
   - CACHE_HITS / CACHE_MISSES: counters for embedding cache efficiency
   - CACHE_ERRORS(kind): counter with kind in {"get","set"} for cache failures
 
+NOTE:
+- Label names MUST match how they're used in middleware/repository code:
+  * REQUESTS.labels(route=..., method=..., status=...)
+  * LATENCY.labels(route=..., method=...)
+  * DB_TIME.labels(route=...)
 """
 
-from prometheus_client import Counter, Histogram, CollectorRegistry, CONTENT_TYPE_LATEST, generate_latest
+from prometheus_client import Counter, Histogram, REGISTRY, CONTENT_TYPE_LATEST, generate_latest
 
-# Single-process default registry is fine for ACA
-REGISTRY = CollectorRegistry(auto_describe=True)
-
-# Matches middleware usage: REQUESTS.labels(route=..., method=..., status=...)
+# Matches: REQUESTS.labels(route=..., method=..., status=...).inc()
 REQUESTS = Counter(
     "http_requests_total",
     "Total HTTP requests",
     labelnames=["route", "method", "status"],
-    registry=REGISTRY,
 )
 
-# Matches middleware usage: LATENCY.labels(route=..., method=...).observe(...)
+# Matches: LATENCY.labels(route=..., method=...).observe(duration)
 LATENCY = Histogram(
     "http_request_duration_seconds",
     "HTTP request duration in seconds",
     labelnames=["route", "method"],
     buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10),
-    registry=REGISTRY,
 )
 
-# Matches repository/db usage in your code: DB_TIME.labels(route="schema").time(), etc.
+# Matches: DB_TIME.labels(route="...").time() blocks in db/repository code
 DB_TIME = Histogram(
     "db_seconds",
     "DB operation durations in seconds",
-    labelnames=["route"],   # IMPORTANT: use 'route' because your code calls labels(route="...")
+    labelnames=["route"],
     buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2),
-    registry=REGISTRY,
 )
 
-# Optional cache error counter (only if you reference it; otherwise harmless)
+# Optional: only if your code references it. Safe to keep even if unused.
 CACHE_ERRORS = Counter(
     "cache_errors_total",
     "Redis cache errors (get/set)",
     labelnames=["kind"],  # 'get' or 'set'
-    registry=REGISTRY,
 )
 
 def setup_metrics(app):
-    """Attach registry to app.state for /metrics endpoint to read."""
-    app.state.prom_registry = REGISTRY
-
-def render_metrics():
-    """Return (content_type, payload) for a Starlette/FastAPI Response."""
-    return CONTENT_TYPE_LATEST, generate_latest(REGISTRY)
+    """Optional: expose metrics handles on app.state for debugging/ops."""
+    app.state.metrics = {
+        "REQUESTS": REQUESTS,
+        "LATENCY": LATENCY,
+        "DB_TIME": DB_TIME,
+        "CACHE_ERRORS": CACHE_ERRORS,
+        "registry": REGISTRY,
+        "render": lambda: (CONTENT_TYPE_LATEST, generate_latest(REGISTRY)),
+    }
