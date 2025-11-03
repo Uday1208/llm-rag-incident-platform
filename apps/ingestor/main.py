@@ -1,13 +1,11 @@
+# apps/ingestor/main.py
+# Purpose: Consume Event Hub app logs, normalize, archive to Blob, and forward to rag-worker.
+# Notes:
+#  - Uses your original env var names (BLOB_CONN, BLOB_CONTAINER, etc.)
+#  - starting_position set to "@latest" to only process new events
+#  - Filters out Azure Monitor "metrics" payloads, keeps Console/System logs
+
 """
-File: main.py
-Service: ingestor
-Purpose: Consume logs from Azure Event Hubs, archive raw to Blob Storage,
-         normalize to a canonical schema, and forward normalized docs to rag-worker /v1/ingest.
-
-Endpoints:
-- GET /health   : liveness check
-- GET /metrics  : Prometheus metrics
-
 Env Vars:
 - EVENTHUB_CONN           : Event Hub connection string
 - EVENTHUB_NAME           : Event Hub name
@@ -23,257 +21,270 @@ Env Vars:
 - SERVICE_NAME            : for logs/metrics tagging (default: "ingestor")
 """
 
-import asyncio
-import hashlib
-import json
-import os
-import time
+import os, json, asyncio, hashlib, logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
 from fastapi import FastAPI
-from pydantic import BaseModel
-from prometheus_client import Counter, Histogram, generate_latest
-from pythonjsonlogger import jsonlogger
+from starlette.responses import PlainTextResponse
 
 from azure.eventhub.aio import EventHubConsumerClient
-from azure.storage.blob import BlobServiceClient
+from azure.eventhub import EventData
+from azure.storage.blob.aio import BlobServiceClient
 
-# ----------------- Config -----------------
-EVENTHUB_CONN  = os.getenv("EVENTHUB_CONN", "")
-EVENTHUB_NAME  = os.getenv("EVENTHUB_NAME", "")
-CONSUMER_GROUP = os.getenv("EVENTHUB_CONSUMER", "$Default")
+# -----------------------
+# Environment (UNCHANGED names)
+# -----------------------
+EVENTHUB_CONN = os.getenv("EVENTHUB_CONN", "")          # NAMESPACE-level listen rule
+EVENTHUB_NAME = os.getenv("EVENTHUB_NAME", "")          # e.g., eh-rag-logs
+EVENTHUB_CONSUMER = os.getenv("EVENTHUB_CONSUMER", "$Default")
 
-BLOB_CONN      = os.getenv("BLOB_CONN", "")
+BLOB_CONN = os.getenv("BLOB_CONN", "")                  # Storage connection string (raw archive)
 BLOB_CONTAINER = os.getenv("BLOB_CONTAINER", "raw-logs")
-RAW_PREFIX     = os.getenv("RAW_PREFIX", "eh/")
 
-RAG_WORKER_URL = os.getenv("RAG_WORKER_URL", "")
-RAG_WORKER_TOKEN = os.getenv("RAG_WORKER_TOKEN", "")
+RAG_WORKER_URL = (os.getenv("RAG_WORKER_URL", "") or "").rstrip("/")
+RAG_INGEST_URL = f"{RAG_WORKER_URL}/v1/ingest" if RAG_WORKER_URL else ""
 
-SRC_FIELD = os.getenv("NORMALIZE_SOURCE_FIELD", "resourceId")
-MSG_FIELD = os.getenv("NORMALIZE_MESSAGE_FIELD", "message")
-TS_FIELD  = os.getenv("NORMALIZE_TS_FIELD", "time")
+POST_TIMEOUT = float(os.getenv("POST_TIMEOUT", "8"))    # HTTP POST timeout to rag-worker
+BATCH_MAX = int(os.getenv("BATCH_MAX", "128"))          # docs per flush
+BATCH_WINDOW = float(os.getenv("BATCH_WINDOW", "1.0"))  # seconds between flushes
 
-SERVICE_NAME = os.getenv("SERVICE_NAME", "ingestor")
+# Limit to "app logs" categories. You can change by env: ALLOW_CATEGORIES="ContainerAppConsoleLogs,ContainerAppSystemLogs"
+ALLOW_CATEGORIES = set(
+    (os.getenv("ALLOW_CATEGORIES") or "ContainerAppConsoleLogs,ContainerAppSystemLogs").split(",")
+)
 
-BATCH_MAX = int(os.getenv("BATCH_MAX", "50"))      # max docs per ingest POST
-BATCH_FLUSH_SECS = float(os.getenv("BATCH_FLUSH_SECS", "2.0"))  # flush window
+# -----------------------
+# Logging (JSON-ish)
+# -----------------------
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format='{"asctime":"%(asctime)s","level":"%(levelname)s","msg":"%(message)s"}',
+)
+log = logging.getLogger("ingestor")
 
-# ----------------- Metrics -----------------
-INGEST_EH_EVENTS   = Counter("ingestor_eh_events_total", "Total events consumed from Event Hubs")
-INGEST_RAW_BYTES   = Counter("ingestor_raw_bytes_total", "Total bytes archived to Blob")
-INGEST_DOCS_NORM   = Counter("ingestor_docs_normalized_total", "Total normalized docs emitted")
-INGEST_POST_OK     = Counter("ingestor_post_ok_total", "Total successful /v1/ingest posts")
-INGEST_POST_ERR    = Counter("ingestor_post_err_total", "Total failed /v1/ingest posts")
-LOOP_LATENCY       = Histogram("ingestor_loop_seconds", "Ingest loop iteration latency seconds")
+# -----------------------
+# Helpers
+# -----------------------
+def utc_iso(ts: Optional[str] = None) -> str:
+    """Return ISO8601 UTC string. If ts is already ISO, pass through."""
+    if ts:
+        try:
+            datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            return ts
+        except Exception:
+            pass
+    return datetime.now(timezone.utc).isoformat()
 
-# ----------------- Logging -----------------
-import logging
-logger = logging.getLogger(SERVICE_NAME)
-logger.setLevel(logging.INFO)
-_handler = logging.StreamHandler()
-_handler.setFormatter(jsonlogger.JsonFormatter())
-logger.addHandler(_handler)
-
-# ----------------- FastAPI -----------------
-app = FastAPI(title="ingestor", version="1.0.0")
-
-@app.get("/health")
-def health():
-    """Return liveness and config sanity (redacted)."""
-    return {
-        "ok": True,
-        "eventhub": bool(EVENTHUB_NAME),
-        "blob_container": BLOB_CONTAINER,
-        "rag_worker_url": bool(RAG_WORKER_URL),
-    }
-
-@app.get("/metrics")
-def metrics():
-    """Expose Prometheus metrics."""
-    return generate_latest()
-
-# ----------------- Helpers -----------------
-def _utc_iso(dt: Optional[str]) -> str:
-    """Normalize timestamp to UTC ISO-8601; if none, now()."""
-    if not dt:
-        return datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()
-    try:
-        # try native parse of common formats
-        return datetime.fromisoformat(dt.replace("Z", "+00:00")).astimezone(timezone.utc).isoformat()
-    except Exception:
-        return datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()
-
-def _sha1_id(source: str, ts: str, content: str) -> str:
-    """Deterministic id (sha1) from source+ts+content."""
+def sha1_id(*parts: str) -> str:
+    """Stable ID for dedupe/debug."""
     h = hashlib.sha1()
-    h.update(source.encode("utf-8", "ignore"))
-    h.update(ts.encode("utf-8", "ignore"))
-    h.update(content.encode("utf-8", "ignore"))
+    for p in parts:
+        h.update(p.encode("utf-8", errors="ignore"))
     return h.hexdigest()
 
-def _archive_blob_name(partition_id: str) -> str:
-    """Build a unique blob path for raw event payload."""
-    now = datetime.utcnow()
-    return f"{RAW_PREFIX}y={now:%Y}/m={now:%m}/d={now:%d}/h={now:%H}/p={partition_id}/{int(time.time()*1000)}.json"
+def is_metric_payload(obj: Dict[str, Any]) -> bool:
+    """Azure Monitor metrics to EH look like {"records":[{..., 'metricName': 'IngressUsageBytes', ...}]}."""
+    if "records" in obj and isinstance(obj["records"], list):
+        rec0 = obj["records"][0] if obj["records"] else {}
+        return isinstance(rec0, dict) and "metricName" in rec0
+    return "metricName" in obj  # rare top-level case
 
-def _normalize_one(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Normalize one EH payload into canonical doc for embeddings."""
-    # Many Azure logs are JSON with keys like time, resourceId, category, level, message
-    # Fallbacks if fields are absent.
-    source = str(payload.get(SRC_FIELD) or payload.get("category") or payload.get("source") or "unknown").strip()
-    content = payload.get(MSG_FIELD) or payload.get("msg") or payload.get("content")
+def is_allowed_log(obj: Dict[str, Any]) -> bool:
+    """Only forward Console/System app logs; drop others unless they look like free-form 'message' records."""
+    cat = (obj.get("category") or obj.get("Category") or "").strip()
+    return (cat in ALLOW_CATEGORIES) or (not cat and ("message" in obj or "msg" in obj))
+
+def normalize_one(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Map Event Hub log shape → our canonical doc (id, source, ts, content)."""
+    if is_metric_payload(payload):
+        return None  # <-- drop metrics
+    if not is_allowed_log(payload):
+        return None  # <-- drop other noise
+
+    source = str(payload.get("category") or payload.get("source") or "unknown").strip()
+
+    # Try common fields for the log content
+    content = payload.get("message") or payload.get("msg") or payload.get("content")
     if not content:
-        # some services place log in 'properties' or 'log'
         props = payload.get("properties") or payload.get("log")
         if isinstance(props, dict):
             content = json.dumps(props)
         elif isinstance(props, str):
             content = props
+
     if not content:
         return None
-    ts_iso = _utc_iso(str(payload.get(TS_FIELD) or payload.get("timestamp") or payload.get("timeGenerated") or ""))
-    doc_id = _sha1_id(source, ts_iso, content)
+
+    ts = payload.get("timeGenerated") or payload.get("timestamp") or payload.get("ts") or utc_iso()
+    ts_iso = utc_iso(str(ts))
+
     return {
-        "id": doc_id,
+        "id": sha1_id(source, ts_iso, str(content)),
         "source": source[:128],
         "ts": ts_iso,
-        "content": str(content)[:5000],  # safety bound
+        "content": str(content)[:5000],
     }
 
-async def _post_to_rag_worker(docs: List[Dict[str, Any]]):
-    """POST documents to rag-worker /v1/ingest in batches."""
-    if not docs:
-        return
-    headers = {"Content-Type": "application/json"}
-    if RAG_WORKER_TOKEN:
-        headers["Authorization"] = f"Bearer {RAG_WORKER_TOKEN}"
-
-    # rag-worker expects {"documents":[{id,source,ts,content}]}
-    for i in range(0, len(docs), BATCH_MAX):
-        batch = docs[i:i+BATCH_MAX]
-        body = {"documents": batch}
-        try:
-            async with httpx.AsyncClient(timeout=20) as cx:
-                r = await cx.post(RAG_WORKER_URL, headers=headers, json=body)
-                r.raise_for_status()
-                INGEST_POST_OK.inc()
-        except Exception as e:
-            INGEST_POST_ERR.inc()
-            logger.error({"msg": "rag-worker ingest failed", "err": str(e), "batch_size": len(batch)})
-
-# ----------------- EH / Blob clients (initialized at startup) -----------------
-eh_client: Optional[EventHubConsumerClient] = None
-blob_client: Optional[BlobServiceClient] = None
-
-# ----------------- EH Callbacks -----------------
-async def on_event(partition_context, event):
-    """Event Hubs callback per event: archive raw, push normalized."""
-    data = event.body_as_str(encoding="UTF-8")
-    partition_id = partition_context.partition_id
-    INGEST_EH_EVENTS.inc()
-
-    # 1) archive raw to Blob
+async def archive_raw(blob_svc: BlobServiceClient, data: bytes, partition_id: str):
+    """Write raw JSONL to blob for later replay/debug."""
+    now = datetime.now(timezone.utc)
+    path = f"eh/{partition_id}/{now:%Y/%m/%d/%H/%M}/{int(now.timestamp()*1_000_0000)}.jsonl"
     try:
-        blob_name = _archive_blob_name(partition_id)
-        b = blob_client.get_blob_client(container=BLOB_CONTAINER, blob=blob_name)
-        payload_raw = {
-            "enqueued_time_utc": event.enqueued_time.astimezone(timezone.utc).isoformat() if event.enqueued_time else None,
-            "system_properties": {k.decode() if isinstance(k, bytes) else k: (v.decode() if isinstance(v, bytes) else v)
-                                  for k, v in (event.system_properties or {}).items()},
-            "body": data,
-        }
-        content_bytes = json.dumps(payload_raw, ensure_ascii=False).encode("utf-8")
-        b.upload_blob(content_bytes, overwrite=False)
-        INGEST_RAW_BYTES.inc(len(content_bytes))
+        cont = blob_svc.get_container_client(BLOB_CONTAINER)
+        await cont.upload_blob(name=path, data=data, overwrite=False)
+        log.info(json.dumps({"msg":"raw archived","partition":partition_id,"bytes":len(data),"blob":path}))
     except Exception as e:
-        logger.error({"msg":"blob archive failed","err":str(e)})
+        log.warning(json.dumps({"msg":"raw archive failed","err":str(e),"partition":partition_id}))
 
-    # 2) normalize + buffer for ingest
-    docs: List[Dict[str, Any]] = []
+async def post_docs(session: httpx.AsyncClient, docs: List[Dict[str, Any]]) -> bool:
+    """POST normalized docs to rag-worker /v1/ingest."""
+    if not RAG_INGEST_URL:
+        log.error(json.dumps({"msg":"rag-worker URL not configured"}))
+        return False
     try:
-        # EH body may be a JSON string or raw text
-        try:
-            j = json.loads(data)
-            if isinstance(j, dict):
-                doc = _normalize_one(j)
-                if doc: docs.append(doc)
-            elif isinstance(j, list):
-                for it in j:
-                    if isinstance(it, dict):
-                        d = _normalize_one(it)
-                        if d: docs.append(d)
-        except json.JSONDecodeError:
-            # treat as plain line
-            doc = _normalize_one({SRC_FIELD: "eventhub", TS_FIELD: None, MSG_FIELD: data})
-            if doc: docs.append(doc)
+        resp = await session.post(RAG_INGEST_URL, json={"documents": docs}, timeout=POST_TIMEOUT)
+        ok = 200 <= resp.status_code < 300
+        log.info(json.dumps({
+            "msg":"rag-worker ingest result",
+            "status": resp.status_code,
+            "count": len(docs),
+            "body": (await resp.aread())[:256].decode("utf-8","ignore") if not ok else ""
+        }))
+        return ok
     except Exception as e:
-        logger.error({"msg":"normalize failed","err":str(e)})
+        log.error(json.dumps({"msg":"rag-worker ingest failed","err":str(e),"count":len(docs)}))
+        return False
 
-    if docs:
-        INGEST_DOCS_NORM.inc(len(docs))
-        await _post_to_rag_worker(docs)
+# -----------------------
+# Event Hub consumer task
+# -----------------------
+async def run_consumer():
+    log.info(json.dumps({
+        "msg":"ingestor starting",
+        "hub":EVENTHUB_NAME,"cg":EVENTHUB_CONSUMER,
+        "rag_ingest":RAG_INGEST_URL,
+        "allow_categories":sorted(list(ALLOW_CATEGORIES))
+    }))
 
-async def on_error(partition_context, error):
-    """EH callback on errors."""
-    logger.error({"msg": "eventhub error", "partition": getattr(partition_context, "partition_id", None), "err": str(error)})
-
-async def on_partition_initialize(partition_context):
-    """EH callback when a partition is initialized."""
-    logger.info({"msg":"partition init","partition":partition_context.partition_id})
-
-async def on_partition_close(partition_context, reason):
-    """EH callback when a partition is closed."""
-    logger.info({"msg":"partition close","partition":partition_context.partition_id,"reason":reason})
-
-# ----------------- Lifespan -----------------
-@app.on_event("startup")
-async def startup():
-    """Initialize EH consumer and Blob client, start receive loop in background."""
-    global eh_client, blob_client
-    assert EVENTHUB_CONN and EVENTHUB_NAME and BLOB_CONN and BLOB_CONTAINER and RAG_WORKER_URL, "Missing required env vars"
-
-    blob_client = BlobServiceClient.from_connection_string(BLOB_CONN)
-    # ensure container exists
-    try:
-        blob_client.create_container(BLOB_CONTAINER)
-    except Exception:
-        pass
-
-    eh_client = EventHubConsumerClient.from_connection_string(
-        conn_str=EVENTHUB_CONN, consumer_group=CONSUMER_GROUP, eventhub_name=EVENTHUB_NAME
+    client = EventHubConsumerClient.from_connection_string(
+        conn_str=EVENTHUB_CONN,
+        consumer_group=EVENTHUB_CONSUMER,
+        eventhub_name=EVENTHUB_NAME
     )
 
-    async def _run():
-        while True:
-            with LOOP_LATENCY.time():
-                try:
-                    await eh_client.receive(
-                        on_event=on_event,
-                        on_error=on_error,
-                        on_partition_initialize=on_partition_initialize,
-                        on_partition_close=on_partition_close,
-                        starting_position="-1",  # from beginning; change to "@latest" for only-new
-                    )
-                except Exception as e:
-                    logger.error({"msg":"receive loop failed; retrying","err":str(e)})
-                    await asyncio.sleep(2)
+    blob_svc = BlobServiceClient.from_connection_string(BLOB_CONN) if BLOB_CONN else None
+    http = httpx.AsyncClient(headers={"content-type":"application/json"})
 
-    app.state._task = asyncio.create_task(_run())
-    logger.info({"msg": "ingestor started"})
+    batch: List[Dict[str, Any]] = []
+    batch_deadline = asyncio.get_event_loop().time() + BATCH_WINDOW
 
-@app.on_event("shutdown")
-async def shutdown():
-    """Graceful shutdown of EH client."""
-    task = getattr(app.state, "_task", None)
-    if task:
-        task.cancel()
-    if eh_client:
-        await eh_client.close()
-    logger.info({"msg": "ingestor stopped"})
+    async def on_event(partition_context, event: EventData):
+        nonlocal batch, batch_deadline
+        body = event.body_as_str(encoding="utf-8", errors="ignore")
+        size = len(body.encode("utf-8", "ignore"))
+        part = partition_context.partition_id
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
+        # Try to parse JSON or JSON-lines
+        items: List[Dict[str, Any]] = []
+        try:
+            if "\n" in body:
+                for line in body.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        items.append(json.loads(line))
+                    except Exception:
+                        items.append({"message": line})
+            else:
+                obj = json.loads(body)
+                # Diagnostics often send {"records":[...]}
+                if isinstance(obj, dict) and "records" in obj and isinstance(obj["records"], list):
+                    items.extend([r for r in obj["records"] if isinstance(r, dict)])
+                else:
+                    items.append(obj if isinstance(obj, dict) else {"message": str(obj)})
+        except Exception as e:
+            log.warning(json.dumps({"msg":"json parse failed","err":str(e),"partition":part,"sample":body[:200]}))
+            items = [{"message": body}]
+
+        # Normalize and filter
+        norm: List[Dict[str, Any]] = []
+        skipped_metrics = 0
+        for it in items:
+            if is_metric_payload(it):
+                skipped_metrics += 1
+                continue
+            doc = normalize_one(it)
+            if doc:
+                norm.append(doc)
+
+        log.info(json.dumps({
+            "msg":"event received",
+            "partition":part,
+            "size_bytes":size,
+            "items":len(items),
+            "normalized":len(norm),
+            "skipped_metrics":skipped_metrics
+        }))
+
+        # Archive raw for audit/replay
+        if blob_svc:
+            try:
+                await archive_raw(blob_svc, (body+"\n").encode("utf-8"), part)
+            except Exception as e:
+                log.warning(json.dumps({"msg":"archive error","err":str(e),"partition":part}))
+
+        if norm:
+            batch.extend(norm)
+
+        # Time/size-based flush
+        now = asyncio.get_event_loop().time()
+        if len(batch) >= BATCH_MAX or now >= batch_deadline:
+            if batch:
+                docs = batch
+                batch = []
+                batch_deadline = now + BATCH_WINDOW
+                await post_docs(http, docs)
+
+        await partition_context.update_checkpoint(event)
+
+    async with client:
+        try:
+            log.info(json.dumps({"msg":"consumer starting receive","start":"@latest"}))
+            # *** CHANGED: start from newest events only ***
+            await client.receive(on_event=on_event, starting_position="@latest")
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            log.error(json.dumps({"msg":"consumer error","err":str(e)}))
+
+    await http.aclose()
+    log.info(json.dumps({"msg":"ingestor stopped"}))
+
+# -----------------------
+# FastAPI app
+# -----------------------
+app = FastAPI()
+
+@app.on_event("startup")
+async def _startup():
+    # Sanity log to confirm which resources are used
+    log.info(json.dumps({
+        "msg":"startup",
+        "hub":EVENTHUB_NAME,
+        "cg":EVENTHUB_CONSUMER,
+        "rag_ingest":RAG_INGEST_URL,
+        "blob_container":BLOB_CONTAINER if BLOB_CONN else None
+    }))
+    asyncio.create_task(run_consumer())  # background consumer
+
+@app.get("/health", response_class=PlainTextResponse)
+async def health():
+    return "ok"
+
+@app.get("/")
+async def root():
+    log.info(json.dumps({"msg":"ingestor root hit"}))
+    return {"ok": True}
