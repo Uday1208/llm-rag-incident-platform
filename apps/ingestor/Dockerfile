@@ -21,7 +21,8 @@ RUN pip install --no-cache-dir \
       python-json-logger==2.0.7 \
       tenacity==8.2.3 \
       azure-eventhub==5.11.5 \
-      azure-storage-blob==12.19.0
+      azure-storage-blob==12.19.0 \
+      aiohttp>=3.9,<4
 
 COPY . /app
 
