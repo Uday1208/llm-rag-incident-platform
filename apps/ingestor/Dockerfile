@@ -22,7 +22,7 @@ RUN pip install --no-cache-dir \
       tenacity==8.2.3 \
       azure-eventhub==5.11.5 \
       azure-storage-blob==12.19.0 \
-      aiohttp>=3.9,<4
+      aiohttp==3.9.5
 
 COPY . /app
 
