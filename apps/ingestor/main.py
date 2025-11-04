@@ -64,6 +64,19 @@ logging.basicConfig(
 )
 log = logging.getLogger("ingestor")
 
+# --- SDK log tuning (NEW) ---
+SDK_LOG_LEVEL = (os.getenv("SDK_LOG_LEVEL") or "WARNING").upper()
+for name in (
+    "uamqp",
+    "azure",                     # umbrella
+    "azure.eventhub",
+    "azure.storage.blob",
+    "azure.core.pipeline.policies.http_logging_policy",
+):
+    lg = logging.getLogger(name)
+    lg.setLevel(getattr(logging, SDK_LOG_LEVEL, logging.WARNING))
+    lg.propagate = False
+
 # -----------------------
 # Helpers
 # -----------------------
@@ -145,17 +158,41 @@ async def post_docs(session: httpx.AsyncClient, docs: List[Dict[str, Any]]) -> b
         return False
     try:
         resp = await session.post(RAG_INGEST_URL, json={"documents": docs}, timeout=POST_TIMEOUT)
-        ok = 200 <= resp.status_code < 300
-        log.info(json.dumps({
-            "msg":"rag-worker ingest result",
-            "status": resp.status_code,
-            "count": len(docs),
-            "body": (await resp.aread())[:256].decode("utf-8","ignore") if not ok else ""
-        }))
-        return ok
+        #ok = 200 <= resp.status_code < 300
+        if 200 <= resp.status_code < 300:
+            log.info(json.dumps({
+                "msg":"rag-worker ingest result",
+                "status": resp.status_code,
+                "count": len(docs)#,
+                #"body": (await resp.aread())[:256].decode("utf-8","ignore") if not ok else ""
+            }))
+            return True
+        else:
+            body = (await resp.aread())[:256].decode("utf-8","ignore")
+            log.info(json.dumps({"msg":"rag-worker ingest result","status": resp.status_code,"count": len(docs),"body": body}))    
+            return False
     except Exception as e:
         log.error(json.dumps({"msg":"rag-worker ingest failed","err":str(e),"count":len(docs)}))
         return False
+
+# --- add module globals (NEW) ---
+EVENTS_TOTAL = 0
+NORMALIZED_TOTAL = 0
+FORWARDED_TOTAL = 0
+SKIPPED_METRICS_TOTAL = 0
+SUMMARY_INTERVAL = int(os.getenv("SUMMARY_INTERVAL", "60"))  # seconds
+
+async def _summary_loop():
+    global EVENTS_TOTAL, NORMALIZED_TOTAL, FORWARDED_TOTAL, SKIPPED_METRICS_TOTAL
+    while True:
+        await asyncio.sleep(SUMMARY_INTERVAL)
+        log.info(json.dumps({
+            "msg":"ingestor summary",
+            "events": EVENTS_TOTAL,
+            "normalized": NORMALIZED_TOTAL,
+            "forwarded": FORWARDED_TOTAL,
+            "skipped_metrics": SKIPPED_METRICS_TOTAL
+        }))
 
 # -----------------------
 # Event Hub consumer task
@@ -171,16 +208,20 @@ async def run_consumer():
     client = EventHubConsumerClient.from_connection_string(
         conn_str=EVENTHUB_CONN,
         consumer_group=EVENTHUB_CONSUMER,
-        eventhub_name=EVENTHUB_NAME
+        eventhub_name=EVENTHUB_NAME,
+        logging_enable=False,               # NEW: no HTTP policy spam
     )
 
-    blob_svc = BlobServiceClient.from_connection_string(BLOB_CONN) if BLOB_CONN else None
+    blob_svc = BlobServiceClient.from_connection_string(
+        BLOB_CONN, logging_enable=False     # NEW
+    ) if BLOB_CONN else None
     http = httpx.AsyncClient(headers={"content-type":"application/json"})
 
     batch: List[Dict[str, Any]] = []
     batch_deadline = asyncio.get_event_loop().time() + BATCH_WINDOW
 
     async def on_event(partition_context, event: EventData):
+        global EVENTS_TOTAL, NORMALIZED_TOTAL, SKIPPED_METRICS_TOTAL
         nonlocal batch, batch_deadline
         body = event.body_as_str(encoding="utf-8", errors="ignore")
         size = len(body.encode("utf-8", "ignore"))
@@ -220,13 +261,29 @@ async def run_consumer():
             if doc:
                 norm.append(doc)
 
-        log.info(json.dumps({
+
+        # after building 'items' and 'norm'
+        EVENTS_TOTAL += len(items)
+        NORMALIZED_TOTAL += len(norm)
+        SKIPPED_METRICS_TOTAL += skipped_metrics
+        
+        '''log.info(json.dumps({
             "msg":"event received",
             "partition":part,
             "size_bytes":size,
             "items":len(items),
             "normalized":len(norm),
             "skipped_metrics":skipped_metrics
+        }))'''
+
+        # Was: log.info(...) every event
+        # Now: only DEBUG per-event (so it’s muted at default WARNING/INFO)
+        log.debug(json.dumps({
+            "msg":"event received",
+            "partition": part,
+            "items": len(items),
+            "normalized": len(norm),
+            "skipped_metrics": skipped_metrics
         }))
 
         # Archive raw for audit/replay
@@ -246,7 +303,10 @@ async def run_consumer():
                 docs = batch
                 batch = []
                 batch_deadline = now + BATCH_WINDOW
-                await post_docs(http, docs)
+                ok = await post_docs(http, docs)
+                if ok:
+                    global FORWARDED_TOTAL
+                    FORWARDED_TOTAL += len(docs)
 
         await partition_context.update_checkpoint(event)
 
@@ -279,6 +339,7 @@ async def _startup():
         "blob_container":BLOB_CONTAINER if BLOB_CONN else None
     }))
     asyncio.create_task(run_consumer())  # background consumer
+    asyncio.create_task(_summary_loop())   # NEW
 
 @app.get("/health", response_class=PlainTextResponse)
 async def health():
