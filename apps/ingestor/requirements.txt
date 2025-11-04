@@ -1,0 +1,15 @@
+fastapi==0.103.2
+uvicorn[standard]==0.23.2
+httpx==0.24.1
+pydantic==1.10.13
+prometheus-client==0.17.1
+python-json-logger==2.0.7
+tenacity==8.2.3
+
+# Azure SDKs
+azure-eventhub==5.11.5
+azure-storage-blob==12.19.0
+azure-core==1.30.2
+
+# EventHub / HTTP helpers
+aiohttp==3.9.5
