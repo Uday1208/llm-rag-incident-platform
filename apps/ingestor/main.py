@@ -223,7 +223,22 @@ async def run_consumer():
     async def on_event(partition_context, event: EventData):
         global EVENTS_TOTAL, NORMALIZED_TOTAL, SKIPPED_METRICS_TOTAL
         nonlocal batch, batch_deadline
-        body = event.body_as_str(encoding="utf-8", errors="ignore")
+        
+        #body = event.body_as_str(encoding="utf-8", errors="ignore")
+        # --- BEGIN robust body decode (replace your body_as_str(...) line) ---
+        # event.body can be bytes or an iterable of bytes depending on azure-eventhub version
+        body = getattr(event, "body", None)
+
+        if isinstance(body, (bytes, bytearray)):
+            raw = bytes(body)
+        else:
+            # body is a generator/iterable of bytes (most common)
+            raw = b"".join(part for part in body)
+        
+        # decode in a version-safe way; ignore broken utf-8 sequences
+        body = raw.decode("utf-8", errors="ignore")
+        # --- END robust body decode ---
+        
         size = len(body.encode("utf-8", "ignore"))
         part = partition_context.partition_id
 
