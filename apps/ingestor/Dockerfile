@@ -8,25 +8,26 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && \
+# System certs + curl for simple health/debug
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl && \
     rm -rf /var/lib/apt/lists/*
 
-# Requirements kept inside image to avoid extra file
-RUN pip install --no-cache-dir \
-      fastapi==0.103.2 \
-      uvicorn[standard]==0.23.2 \
-      httpx==0.24.1 \
-      pydantic==1.10.13 \
-      prometheus-client==0.17.1 \
-      python-json-logger==2.0.7 \
-      tenacity==8.2.3 \
-      azure-eventhub==5.11.5 \
-      azure-storage-blob==12.19.0 \
-      aiohttp==3.9.5
+# Copy only reqs first to maximize layer cache
+COPY requirements.txt /app/requirements.txt
 
+# Install Python deps
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir -r /app/requirements.txt
+
+# App source
 COPY . /app
 
-# Create non-root user
+# Make sure package-style imports work for modules/
+# (if not already present in your repo)
+RUN mkdir -p /app/modules && touch /app/modules/__init__.py || true
+
+# Non-root user
 RUN useradd -m svc && chown -R svc:svc /app
 USER svc
 
