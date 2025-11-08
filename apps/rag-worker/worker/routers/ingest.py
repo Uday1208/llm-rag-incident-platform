@@ -87,10 +87,26 @@ async def ingest(req: IngestRequest):
         # Prevent mismatched inserts (dimension drift or partial encode)
         raise HTTPException(status_code=500, detail="embedding output size mismatch")
 
-    # Build rows for repository (id, source, ts, content, embedding)
+    '''# Build rows for repository (id, source, ts, content, embedding)
     rows: List[Tuple[str, str, str, str, list]] = []
     for i in range(len(contents)):
         rows.append((ids[i], sources[i], ts_list[i], contents[i], vecs[i]))
 
-    n = upsert_documents(rows)
-    return {"upserted": n}
+    n = upsert_documents(rows)'''
+    
+    # --- BEGIN minimal add for severity (keeps your order & types) ---
+    rows = []
+    for d, v in zip(req.documents, vecs):
+        # _coerce_severity was added earlier; works with Pydantic model or dict
+        sev = _coerce_severity(d.dict() if hasattr(d, "dict") else d)
+        rows.append((
+            d.id,
+            d.source,
+            d.ts,        # already ISO per your schema
+            d.content,
+            sev,         # <--- NEW: severity (int 0..5) or None
+            v,           # embedding (list[float])
+        ))
+    count = upsert_documents(rows)
+    # --- END minimal add for severity ---
+    return {"upserted": count}
