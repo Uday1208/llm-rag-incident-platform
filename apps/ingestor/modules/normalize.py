@@ -3,7 +3,7 @@
 
 from typing import Any, Dict, Optional, Tuple
 import json
-import os
+import os, hashlib
 from datetime import datetime, timezone
 import re
 
@@ -26,6 +26,12 @@ ALLOW_CATEGORIES = set(
     (os.getenv("ALLOW_CATEGORIES") or "ContainerAppConsoleLogs,ContainerAppSystemLogs")
     .split(",")
 )
+
+_SEV_ORDER = {"DEBUG":0, "INFO":1, "WARNING":2, "ERROR":3, "CRITICAL":4}
+FORWARD_MIN_LEVEL = (os.getenv("FORWARD_MIN_LEVEL") or "INFO").upper()
+
+def _level_ok(level: str) -> bool:
+    return _SEV_ORDER.get(level.upper(), 1) >= _SEV_ORDER.get(FORWARD_MIN_LEVEL, 1)
 
 _HTTP_ERR_RE = re.compile(r'\b(5\d{2})\b.*\b(Internal Server Error|Gateway|Timeout|Error)\b', re.I)
 _HTTP_WARN_RE = re.compile(r'\b(4\d{2})\b', re.I)
@@ -101,6 +107,12 @@ def utc_iso(ts: Optional[str] = None) -> str:
             pass
     return datetime.now(timezone.utc).isoformat()
 
+def sha1_id(*parts: str) -> str:
+    h = hashlib.sha1()
+    for p in parts:
+        h.update(p.encode("utf-8", errors="ignore"))
+    return h.hexdigest()
+    
 '''def normalize_payload(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     Map various Azure/console shapes to {id?, source, ts, content, severity?}.
