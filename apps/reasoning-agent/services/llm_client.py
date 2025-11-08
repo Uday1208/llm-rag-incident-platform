@@ -5,14 +5,15 @@ import os
 import json
 from typing import List, Dict, Any, Optional
 import httpx
-import anyio
+import asyncio, anyio
 
 # --- Env (names kept simple & explicit) ---
 LLM_KIND = (os.getenv("LOCAL_LLM_KIND") or "").strip().lower()       # "openai_compat" | "ollama"
 LLM_BASE = (os.getenv("LOCAL_LLM_BASE_URL") or "").rstrip("/")       # e.g. http://local-llm:8000  or http://ollama:11434
 LLM_MODEL = os.getenv("LOCAL_LLM_MODEL", "qwen2.5:7b")
 LLM_KEY   = os.getenv("LOCAL_LLM_API_KEY", "")                       # optional for openai_compat
-LLM_TIMEOUT = float(os.getenv("LOCAL_LLM_TIMEOUT", "15"))
+LLM_TIMEOUT = float(os.getenv("LOCAL_LLM_TIMEOUT", "25"))            # bump from default
+LLM_RETRIES  = int(os.getenv("LLM_RETRIES", "2")) 
 
 # Optional fallback to Azure OpenAI if local fails
 AOAI_ENDPOINT = (os.getenv("AOAI_ENDPOINT") or "").rstrip("/")
@@ -52,12 +53,20 @@ async def _openai_compat_chat(messages: List[Dict[str, str]], temperature: float
         data = r.json()
         return (data["choices"][0]["message"]["content"] or "").strip()
 
+class LLMTimeout(Exception):
+    """Raised when LLM calls time out after retries."""
+    pass
 
-async def _ollama_chat(messages: List[Dict[str, str]], temperature: float, max_tokens: int) -> str:
+class LLMUnavailable(Exception):
+    """Raised when the LLM endpoint returns 4xx/5xx or can’t be reached."""
+    pass
+
+async def _ollama_chat(messages: List[Dict[str, str]], temperature: float = 0.3, max_tokens: int = 512) -> str:
     """
-    Calls Ollama /api/chat.
+    Talks to an Ollama-compatible endpoint: POST {LLM_BASE_URL}/api/chat
+    Body: { model, messages, options{temperature,num_predict} }
     """
-    url = f"{LLM_BASE}/api/chat"
+    url = f"{LLM_BASE_URL}/api/chat"
     payload = {
         "model": LLM_MODEL,
         "messages": messages,
@@ -67,14 +76,36 @@ async def _ollama_chat(messages: List[Dict[str, str]], temperature: float, max_t
         },
         "stream": False
     }
-    async with httpx.AsyncClient(timeout=LLM_TIMEOUT) as http:
-        r = await http.post(url, json=payload)
-        r.raise_for_status()
-        data = r.json()
-        # Ollama can return either "message":{"content":...} or "response"
-        if "message" in data and isinstance(data["message"], dict):
-            return (data["message"].get("content") or "").strip()
-        return (data.get("response") or "").strip()
+
+    last_err = None
+    for attempt in range(LLM_RETRIES + 1):
+        try:
+            async with httpx.AsyncClient(timeout=LLM_TIMEOUT) as http:
+                r = await http.post(url, json=payload)
+                if r.status_code >= 500:
+                    raise LLMUnavailable(f"LLM 5xx: {r.status_code}")
+                if r.status_code >= 400:
+                    # pass back text to the caller; often model not loaded etc.
+                    raise LLMUnavailable(f"LLM 4xx: {r.status_code} {r.text[:200]}")
+                data = r.json()
+                # Ollama chat returns { message: { role, content }, ... }
+                msg = (data.get("message") or {}).get("content") or data.get("response")
+                return msg or ""
+        except (httpx.ReadTimeout, httpx.ConnectTimeout) as e:
+            last_err = e
+            if attempt < LLM_RETRIES:
+                await asyncio.sleep(0.5 * (attempt + 1))
+                continue
+            raise LLMTimeout(f"LLM request timed out after {LLM_RETRIES+1} attempts") from e
+        except httpx.HTTPError as e:
+            last_err = e
+            if attempt < LLM_RETRIES:
+                await asyncio.sleep(0.5 * (attempt + 1))
+                continue
+            raise LLMUnavailable(f"LLM HTTP error: {e}") from e
+    # Fallback (shouldn’t hit)
+    raise LLMUnavailable(str(last_err) if last_err else "unknown LLM error")
+
 
 
 async def _aoai_chat(messages: List[Dict[str, str]], temperature: float, max_tokens: int) -> str:
@@ -103,7 +134,7 @@ async def _aoai_chat(messages: List[Dict[str, str]], temperature: float, max_tok
 async def chat_reasoning(
     question: str,
     contexts: List[str],
-    temperature: float = 0.2,
+    temperature: float = 0.3,
     max_tokens: int = 512,
     system_prompt: Optional[str] = None,
 ) -> str:
