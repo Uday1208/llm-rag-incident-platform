@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 from fastapi import FastAPI
 from starlette.responses import PlainTextResponse
+import re
 
 # Safe imports from our helper modules (absolute first, then relative)
 try:
