@@ -26,6 +26,22 @@ ALLOW_CATEGORIES = set(
     .split(",")
 )
 
+_HTTP_ERR_RE = re.compile(r'\b(5\d{2})\b.*\b(Internal Server Error|Gateway|Timeout|Error)\b', re.I)
+_HTTP_WARN_RE = re.compile(r'\b(4\d{2})\b', re.I)
+
+def classify_severity(msg: str) -> str:
+    t = msg.strip()
+    if _HTTP_ERR_RE.search(t):
+        return "ERROR"
+    if _HTTP_WARN_RE.search(t):
+        return "WARNING"
+    # common app prefixes
+    if t.startswith(("ERROR", "Exception", "Traceback")):
+        return "ERROR"
+    if t.startswith(("WARN", "WARNING")):
+        return "WARNING"
+    return "INFO"
+
 def _coerce_level(val: Any) -> Tuple[str, int]:
     """Return (LEVEL_NAME, LEVEL_NO). Accept strings or ints."""
     if val is None:
