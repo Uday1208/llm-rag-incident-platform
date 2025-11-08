@@ -80,6 +80,31 @@ for name in ("uamqp", "azure", "azure.eventhub", "azure.storage.blob",
 # -----------------------
 # Helpers
 # -----------------------
+
+# --- add near other helpers ---
+
+_SEV_ORDER = {"DEBUG":0, "INFO":1, "WARNING":2, "ERROR":3, "CRITICAL":4}
+FORWARD_MIN_LEVEL = (os.getenv("FORWARD_MIN_LEVEL") or "INFO").upper()
+
+def _level_ok(level: str) -> bool:
+    return _SEV_ORDER.get(level.upper(), 1) >= _SEV_ORDER.get(FORWARD_MIN_LEVEL, 1)
+
+_HTTP_ERR_RE = re.compile(r'\b(5\d{2})\b.*\b(Internal Server Error|Gateway|Timeout|Error)\b', re.I)
+_HTTP_WARN_RE = re.compile(r'\b(4\d{2})\b', re.I)
+
+def classify_severity(msg: str) -> str:
+    t = msg.strip()
+    if _HTTP_ERR_RE.search(t):
+        return "ERROR"
+    if _HTTP_WARN_RE.search(t):
+        return "WARNING"
+    # common app prefixes
+    if t.startswith(("ERROR", "Exception", "Traceback")):
+        return "ERROR"
+    if t.startswith(("WARN", "WARNING")):
+        return "WARNING"
+    return "INFO"
+
 def utc_iso(ts: Optional[str] = None) -> str:
     if ts:
         try:
@@ -151,7 +176,7 @@ async def run_consumer():
         part = getattr(partition_context, "partition_id", "0") or "0"
         EVENTS_TOTAL += len(items)
 
-        norm: List[Dict[str, Any]] = []
+        '''norm: List[Dict[str, Any]] = []
         skipped_metrics = 0
         dropped_by_level = 0
 
@@ -193,6 +218,28 @@ async def run_consumer():
             }
             norm.append(doc_out)
 
+        NORMALIZED_TOTAL += len(norm)
+        SKIPPED_METRICS_TOTAL += skipped_metrics
+        DROPPED_BY_LEVEL_TOTAL += dropped_by_level'''
+
+        # Normalize and filter
+        norm: List[Dict[str, Any]] = []
+        dropped_by_level = 0
+        skipped_metrics = 0
+        
+        for it in items:
+            if is_metric_payload(it):
+                skipped_metrics += 1
+                continue
+            doc = normalize_one(it)
+            if not doc:
+                continue
+            if doc.pop("_dropped_by_level", False):
+                dropped_by_level += 1
+                continue
+            norm.append(doc)
+        
+        EVENTS_TOTAL += len(items)
         NORMALIZED_TOTAL += len(norm)
         SKIPPED_METRICS_TOTAL += skipped_metrics
         DROPPED_BY_LEVEL_TOTAL += dropped_by_level
