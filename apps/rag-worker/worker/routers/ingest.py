@@ -14,6 +14,32 @@ from worker.schemas.ingest import IngestRequest
 from worker.embeddings import embed_texts
 from worker.repository import upsert_documents
 
+def _coerce_severity(doc) -> int | None:
+    """
+    Map incoming fields to severity int 0..5.
+    Accepts: severity (int/str), or level/severity_level strings.
+    Returns None if unknown.
+    """
+    try:
+        if 'severity' in doc and doc['severity'] is not None:
+            s = int(doc['severity'])
+            return max(0, min(5, s))
+    except Exception:
+        pass
+
+    lvl = str(doc.get('level') or doc.get('severity_level') or "").strip().lower()
+    if lvl:
+        table = {
+            "trace": 0, "debug": 0,
+            "info": 1,
+            "warn": 2, "warning": 2,
+            "error": 3,
+            "critical": 4, "fatal": 5,
+        }
+        return table.get(lvl, None)
+    return None
+
+
 router = APIRouter()
 
 @router.post("/v1/ingest")
