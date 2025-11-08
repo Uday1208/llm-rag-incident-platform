@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional, Tuple
 import json
 import os
 from datetime import datetime, timezone
+import re
 
 # Canonical numeric levels
 LEVEL_NUM = {
