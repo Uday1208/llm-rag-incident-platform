@@ -20,6 +20,7 @@ RUN pip install --no-cache-dir \
       uvicorn[standard]==0.23.2 \
       httpx==0.24.1 \
       pydantic==1.10.13 \
+      anyio>=4.4 \
       prometheus-client==0.17.1
 #   transformers==4.36.2 \
 #   sentence-transformers==2.2.2
