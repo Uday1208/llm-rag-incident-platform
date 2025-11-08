@@ -19,6 +19,11 @@ SEVERITY_KEYS = (
     "severityLevel", "levelname", "LEVEL"
 )
 
+ALLOW_CATEGORIES = set(
+    (os.getenv("ALLOW_CATEGORIES") or "ContainerAppConsoleLogs,ContainerAppSystemLogs")
+    .split(",")
+)
+
 def _coerce_level(val: Any) -> Tuple[str, int]:
     """Return (LEVEL_NAME, LEVEL_NO). Accept strings or ints."""
     if val is None:
@@ -64,6 +69,10 @@ def _first(d: Dict[str, Any], keys: tuple) -> Optional[Any]:
             return d[k]
     return None
 
+def is_allowed_log(obj: Dict[str, Any]) -> bool:
+    cat = (obj.get("category") or obj.get("Category") or "").strip()
+    return (cat in ALLOW_CATEGORIES) or (not cat and ("message" in obj or "msg" in obj))
+    
 '''def normalize_payload(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     Map various Azure/console shapes to {id?, source, ts, content, severity?}.
