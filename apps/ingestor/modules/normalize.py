@@ -73,7 +73,16 @@ def _first(d: Dict[str, Any], keys: tuple) -> Optional[Any]:
 def is_allowed_log(obj: Dict[str, Any]) -> bool:
     cat = (obj.get("category") or obj.get("Category") or "").strip()
     return (cat in ALLOW_CATEGORIES) or (not cat and ("message" in obj or "msg" in obj))
-    
+
+def utc_iso(ts: Optional[str] = None) -> str:
+    if ts:
+        try:
+            datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+            return str(ts)
+        except Exception:
+            pass
+    return datetime.now(timezone.utc).isoformat()
+
 '''def normalize_payload(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     Map various Azure/console shapes to {id?, source, ts, content, severity?}.
