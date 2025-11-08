@@ -64,7 +64,7 @@ def _first(d: Dict[str, Any], keys: tuple) -> Optional[Any]:
             return d[k]
     return None
 
-def normalize_payload(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+'''def normalize_payload(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     Map various Azure/console shapes to {id?, source, ts, content, severity?}.
     - source: category / source / app resource path
@@ -96,4 +96,64 @@ def normalize_payload(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "ts": str(ts) if ts else None,
         "content": str(content),
         "severity": level_name,
+    }'''
+
+def normalize_payload(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    # Drop metrics & non-allowed categories
+    if is_metric_payload(payload):
+        return None
+    if not is_allowed_log(payload):
+        return None
+
+    # Pull “message” from common places; prefer Azure Container Apps shape
+    props = payload.get("properties") if isinstance(payload.get("properties"), dict) else {}
+    log_line = props.get("Log")
+    content = (
+        payload.get("message")
+        or payload.get("msg")
+        or payload.get("content")
+        or (json.dumps(payload.get("log")) if isinstance(payload.get("log"), dict) else None)
+        or log_line
+    )
+    if not content:
+        return None
+
+    # Identify app/infra attributes for provenance
+    app = props.get("ContainerAppName") or payload.get("ContainerAppName") or ""
+    container = props.get("ContainerName") or payload.get("ContainerName") or ""
+    revision = props.get("RevisionName") or payload.get("RevisionName") or ""
+    source = (payload.get("category") or payload.get("Category") or "unknown").strip()
+    if app or container:
+        source = f"{app}/{container}".strip("/")
+
+    # Timestamp
+    ts = (payload.get("timeGenerated")
+          or payload.get("timestamp")
+          or payload.get("time")
+          or payload.get("ts"))
+    ts_iso = utc_iso(str(ts) if ts else None)
+
+    # Classify severity from the final message string
+    sev = classify_severity(str(content))
+
+    # Honor forward_min_level (drop noise before DB)
+    if not _level_ok(sev):
+        # counted by caller via dropped_by_level
+        return {"_dropped_by_level": True}
+
+    # Build canonical doc; keep content concise but useful
+    doc = {
+        "id": sha1_id(source, ts_iso, str(content)),
+        "source": source[:128] or "unknown",
+        "ts": ts_iso,
+        "content": str(content)[:5000],
+        "severity": sev,                 # <— NEW
+        "meta": {                        # <— optional tags for later query
+            "app": app or None,
+            "container": container or None,
+            "revision": revision or None,
+            "category": payload.get("category") or payload.get("Category"),
+            "resourceId": payload.get("resourceId"),
+        },
     }
+    return doc
