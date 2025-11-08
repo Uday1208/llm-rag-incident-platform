@@ -10,6 +10,7 @@ import asyncio, anyio
 # --- Env (names kept simple & explicit) ---
 LLM_KIND = (os.getenv("LOCAL_LLM_KIND") or "").strip().lower()       # "openai_compat" | "ollama"
 LLM_BASE = (os.getenv("LOCAL_LLM_BASE_URL") or "").rstrip("/")       # e.g. http://local-llm:8000  or http://ollama:11434
+LLM_BASE_URL = (os.getenv("LLM_BASE_URL") or "http://local-llm:11434").rstrip("/")
 LLM_MODEL = os.getenv("LOCAL_LLM_MODEL", "qwen2.5:7b")
 LLM_KEY   = os.getenv("LOCAL_LLM_API_KEY", "")                       # optional for openai_compat
 LLM_TIMEOUT = float(os.getenv("LOCAL_LLM_TIMEOUT", "25"))            # bump from default
