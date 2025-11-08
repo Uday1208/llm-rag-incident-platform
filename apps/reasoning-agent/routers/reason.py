@@ -1,5 +1,5 @@
 # apps/reasoning-agent/routers/reason.py  (example)
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
 
