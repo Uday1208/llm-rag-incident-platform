@@ -14,19 +14,27 @@ def _to_pyfloats(vec: Iterable) -> list[float]:
     """Convert any numeric iterable (e.g., numpy) into plain Python floats."""
     return [float(x) for x in vec]
 
-
+# Row shape expected by upsert_documents:
+# (id, source, ts_iso, content, severity, embedding)
+# - severity is Optional[int] (0..5). Pass None if unknown.
 def upsert_documents(rows: Iterable[Tuple[str, str, str, str, list]]) -> int:
-    """Upsert documents: (id, source, ts_iso, content, embedding)."""
+    """Upsert documents: (id, source, ts_iso, content, severity, embedding)."""
     sql = f"""
-    INSERT INTO documents (id, source, ts, content, embedding)
-    VALUES (%s, %s, %s, %s, CAST(%s AS {VEC_TYPE}))
+    INSERT INTO documents (id, source, ts, content, severity, embedding)
+    VALUES (%s, %s, %s, %s, %s, CAST(%s AS {VEC_TYPE}))
     ON CONFLICT (id) DO UPDATE
       SET source    = EXCLUDED.source,
           ts        = EXCLUDED.ts,
           content   = EXCLUDED.content,
+          -- only overwrite severity if a new non-null value is provided
+          severity  = COALESCE(EXCLUDED.severity, documents.severity),
           embedding = EXCLUDED.embedding;
     """
-    materialized = [(i, s, ts, c, _to_pyfloats(e)) for (i, s, ts, c, e) in rows]
+    materialized = [(i, s, ts, c, sev, _to_pyfloats(e)) for (i, s, ts, c, sev, e) in rows]
+
+    if not materialized:
+        return 0
+        
     with DB_TIME.labels(route="upsert").time():
         with get_conn() as conn, conn.cursor() as cur:
             cur.executemany(sql, materialized)
