@@ -232,7 +232,8 @@ async def run_consumer():
             if is_metric_payload(it):
                 skipped_metrics += 1
                 continue
-            doc = normalize_one(it)
+            #doc = normalize_one(it)
+            doc = normalize_payload(it)
             if not doc:
                 continue
             if doc.pop("_dropped_by_level", False):
