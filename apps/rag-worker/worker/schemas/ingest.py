@@ -13,7 +13,8 @@ class IngestDoc(BaseModel):
     source: str = Field("", description="Source label")
     ts: Optional[datetime] = Field(None, description="Event timestamp")
     content: str = Field(..., description="Raw text content to index")
-    severity: Optional[int] = None  # NEW
+    #severity: Optional[int] = None  # NEW
+    severity: Optional[str] = None   # ← change to Optional[str]
 
 class IngestRequest(BaseModel):
     """Ingest request holding a list of documents."""
