@@ -84,6 +84,35 @@ ISO_RE  = re.compile(r"\b\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z\b")
 NUM_RE  = re.compile(r"\b\d+\b")
 APP_FRAME_RE = re.compile(r'File "(/app/[^"]+)", line (\d+), in ([\w<>]+)')
 
+TB_MARK = "Traceback (most recent call last):"
+EXC_TAIL_RE = re.compile(r"^\s*([\w\.]+(?:Error|Exception|Failure|Exit))\s*:(.*)$")
+
+def is_tb_start(line: str) -> bool:
+    return TB_MARK in (line or "")
+
+def is_tb_frame_or_cont(line: str) -> bool:
+    """Heuristic: part of traceback block (indented lines, File \"...\", or 'During handling...' etc.)"""
+    s = (line or "")
+    ls = s.lstrip()
+    return (
+        ls.startswith('File "') or
+        ls.startswith("File '") or
+        ls.startswith("During handling of the above exception") or
+        s.startswith("  ") or
+        s.startswith("\t")
+    )
+
+def is_exception_tail(line: str) -> bool:
+    """Looks like 'ValueError: message' etc."""
+    return bool(EXC_TAIL_RE.match(line or ""))
+
+def parse_exception_tail(line: str) -> Tuple[Optional[str], Optional[str]]:
+    m = EXC_TAIL_RE.match(line or "")
+    if not m:
+        return None, None
+    return m.group(1).strip(), m.group(2).strip()
+
+
 def generalize_message(s: str) -> str:
     """Replace dynamic tokens to stabilize dedup signature."""
     s = UUID_RE.sub("#UUID#", s)
@@ -271,74 +300,149 @@ def parse_jsonl_or_records(raw: str) -> Iterable[Dict[str, Any]]:
 # --------------- condenser ---------------
 def process_blob_text(raw: str, blob_name: str) -> List[Dict[str, Any]]:
     """
-    Return a list of compact incident docs to persist.
-    Dedupe inside a single blob by signature.
+    Build compact 'incident episode' docs by stitching traceback lines that
+    are split across multiple records in the blob.
     """
+    # Episode state
     episodes: Dict[str, Dict[str, Any]] = {}
-    counts: DefaultDict[str, int] = defaultdict(int)
+    current = None  # type: Optional[Dict[str, Any]]
+    prev_nonempty_message = ""  # candidate headline
+    last_source_for_prev = "unknown"
+    last_ts_for_prev = None
 
+    def flush_current():
+        nonlocal current, episodes
+        if not current:
+            return
+        # Build summary content
+        lines = current["lines"]  # type: List[str]
+        tb_text = "\n".join(lines)
+        app_frames = extract_app_frames(tb_text)
+        last_app_frame = app_frames[-1] if app_frames else None
+
+        # Exception summary
+        exc_type, exc_msg = extract_exception_summary(tb_text)
+        if not exc_type:
+            # try last line style once more
+            for ln in reversed([ln for ln in lines if ln.strip()]):
+                if is_exception_tail(ln):
+                    exc_type, exc_msg = parse_exception_tail(ln)
+                    break
+
+        # Headline: prefer captured, else previous nonempty message
+        headline = (current.get("headline") or "").strip()
+        if not headline:
+            headline = (current.get("fallback_headline") or "").strip()
+
+        # Signature + doc
+        signature = build_signature(current.get("source","unknown"), exc_type, headline, last_app_frame)
+        if signature not in episodes:
+            summary = []
+            if headline:              summary.append(f"Headline: {headline}")
+            if exc_type:              summary.append(f"Exception: {exc_type}" + (f": {exc_msg}" if exc_msg else ""))
+            if last_app_frame:        summary.append(f"AppFrame: {last_app_frame}")
+            if app_frames:            summary.append("Stack:\n" + "\n".join(app_frames[-MAX_STACK_LINES:]))
+            summary.append(f"Count: {current['count']}  Blobs: {blob_name}")
+
+            episodes[signature] = {
+                "id": hashlib.sha1(signature.encode("utf-8")).hexdigest(),
+                "source": current.get("source","unknown")[:128],
+                "ts": current.get("ts_last") or current.get("ts_first") or utc_iso(None),
+                "content": "\n".join(summary)[:5000],
+                "severity": current.get("severity") or None,
+            }
+        else:
+            # bump last-seen ts if we see another episode with same signature
+            if current.get("ts_last"):
+                episodes[signature]["ts"] = current["ts_last"]
+
+        current = None
+
+    # Walk records in order
     for obj in parse_jsonl_or_records(raw):
         content, source, ts = read_content_and_meta(obj)
-        # severity detection from fields (level, Level, severity, etc.)
         sev = coerce_severity(obj.get("level") or obj.get("Level") or obj.get("severity"))
+        ts = utc_iso(ts)
 
-        # Skip low-level unless traceback present
-        headline, tb = find_traceback_bits(content)
-        if not headline and not tb and not meets_min_level(sev):
+        text = (content or "").rstrip("\n")
+        if not text.strip():
             continue
 
-        app_frames = extract_app_frames(tb or "")
-        last_app_frame = app_frames[-1] if app_frames else None
-        exc_type, exc_msg = extract_exception_summary(tb or "")
+        # If not within an episode, see if this starts one
+        if current is None:
+            # maintain previous non-empty line as a possible headline
+            if is_tb_start(text):
+                current = {
+                    "lines": [text],
+                    "headline": prev_nonempty_message,   # may be empty
+                    "fallback_headline": prev_nonempty_message,
+                    "source": source,
+                    "ts_first": ts,
+                    "ts_last": ts,
+                    "severity": sev,
+                    "count": 1,
+                    "seen_exc_tail": is_exception_tail(text),
+                }
+            else:
+                prev_nonempty_message = text
+                last_source_for_prev = source
+                last_ts_for_prev = ts
+            continue
 
-        # Use headline if present, otherwise fall back to message
-        hline = headline or content.strip().splitlines()[0][:300]
+        # We are in an episode
+        current["ts_last"] = ts
+        if LEVEL_ORDER.get(sev,10) > LEVEL_ORDER.get(current.get("severity","INFO"),10):
+            current["severity"] = sev
 
-        signature = build_signature(source, exc_type, hline, last_app_frame)
-        counts[signature] += 1
-        ep = episodes.get(signature)
-        if not ep:
-            episodes[signature] = ep = {
-                "id": hashlib.sha1(signature.encode("utf-8")).hexdigest(),
-                "source": source[:128],
+        if is_tb_start(text):
+            # A new traceback starts; flush the current, then start new
+            flush_current()
+            current = {
+                "lines": [text],
+                "headline": prev_nonempty_message,
+                "fallback_headline": prev_nonempty_message,
+                "source": source,
                 "ts_first": ts,
                 "ts_last": ts,
                 "severity": sev,
-                "headline": hline,
-                "exception": exc_type,
-                "app_frame": last_app_frame,
-                "stack_core": "\n".join(app_frames) if app_frames else "",
-                "blob_refs": [blob_name],
                 "count": 1,
+                "seen_exc_tail": is_exception_tail(text),
             }
-        else:
-            ep["ts_last"] = ts  # last seen
-            ep["count"] += 1
-            # escalate severity if any later line is higher
-            if LEVEL_ORDER.get(sev, 10) > LEVEL_ORDER.get(ep["severity"], 10):
-                ep["severity"] = sev
-            # add blob ref once per blob
-            if blob_name not in ep["blob_refs"]:
-                ep["blob_refs"].append(blob_name)
+            continue
 
-    # Convert to documents rows (single ts: pick last)
+        # Still same episode; append traceback parts
+        current["lines"].append(text)
+        current["count"] += 1
+        if is_exception_tail(text):
+            current["seen_exc_tail"] = True
+        else:
+            # Heuristic: if line is NOT a traceback continuation and we already saw an exception tail,
+            # the episode likely ended.
+            if (not is_tb_frame_or_cont(text)) and current.get("seen_exc_tail"):
+                flush_current()
+                # this line is a normal log; keep as next headline candidate
+                prev_nonempty_message = text
+                last_source_for_prev = source
+                last_ts_for_prev = ts
+
+    # End of blob: flush if open
+    flush_current()
+
+    # Convert episodes to docs
     docs: List[Dict[str, Any]] = []
-    for sig, ep in episodes.items():
-        summary_lines = []
-        if ep.get("headline"):   summary_lines.append(f"Headline: {ep['headline']}")
-        if ep.get("exception"):  summary_lines.append(f"Exception: {ep['exception']}")
-        if ep.get("app_frame"):  summary_lines.append(f"AppFrame: {ep['app_frame']}")
-        if ep.get("stack_core"): summary_lines.append("Stack:\n" + ep["stack_core"])
-        summary_lines.append(f"Count: {ep['count']}  Blobs: {', '.join(ep['blob_refs'][:3])}")
-        content = "\n".join(summary_lines)
+    for ep in episodes.values():
+        # apply severity gate (optional)
+        if not meets_min_level(ep.get("severity") or "INFO"):
+            continue
         docs.append({
             "id": ep["id"],
             "source": ep["source"],
-            "ts": ep["ts_last"],               # choose last seen
-            "content": content[:5000],         # keep conservative
-            "severity": ep["severity"] or None # Optional[str] column
+            "ts": ep["ts"],
+            "content": ep["content"],
+            "severity": ep.get("severity")
         })
     return docs
+
 
 # --------------- main ---------------
 def main():
