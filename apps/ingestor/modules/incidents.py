@@ -364,3 +364,36 @@ def _max_level_rank(records: List[dict]) -> tuple[str, int]:
             if best_rank >= LEVEL_RANK["CRITICAL"]:
                 break
     return best, best_rank
+
+# --- Back-compat shims (for existing callers like main.py) ---
+def summarize_from_lines(lines, min_level: str = "WARNING"):
+    """
+    Accepts a list/iterable of log lines and returns incidents (0..1),
+    delegating to summarize_blob to preserve v3 behavior.
+    """
+    try:
+        iter(lines)  # ensure iterable
+    except Exception:
+        lines = [str(lines)]
+    text = "\n".join(str(x).rstrip("\r\n") for x in lines if x is not None)
+    return summarize_blob(text, min_level=min_level)
+
+def summarize_from_text(text: str, min_level: str = "WARNING"):
+    """Text -> incidents (0..1), convenience wrapper."""
+    return summarize_blob(text or "", min_level=min_level)
+
+def summarize_from_records(records, min_level: str = "WARNING"):
+    """Records -> incidents (0..1), convenience wrapper."""
+    incidents, _ = summarize_records(records or [], min_level=min_level)
+    return incidents
+
+# Optional: export names if you keep __all__
+try:
+    __all__  # might not exist
+except NameError:
+    __all__ = []
+__all__ += [
+    "summarize_from_lines",
+    "summarize_from_text",
+    "summarize_from_records",
+]
