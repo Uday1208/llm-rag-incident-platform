@@ -1,298 +1,240 @@
-# tools/error_blobs_to_pg.py
-"""
-Read list of error-like blob paths, summarize incidents, and send to rag-worker /v1/ingest.
+# tools/errors_blobs_to_pg.py
+# Read blob paths (from --paths-file or stdin), summarize incidents via modules.incidents,
+# and (optionally) insert into Postgres.
+#
+# Env:
+#   BLOB_CONN, BLOB_CONTAINER
+#   (optional) MIN_LEVEL=WARNING|ERROR|...
+#   (optional) UPLIFT_FIRST_FRAMES=1
+#   (optional) KEEP_INTERNAL=1
+#   Postgres via PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE (or DATABASE_URL)
+#
+# Usage:
+#   python -m tools.errors_blobs_to_pg \
+#     --paths-file /tmp/error_blobs.txt \
+#     --conn "$BLOB_CONN" \
+#     --container raw-logs \
+#     --min-level ERROR \
+#     --dry-run
+#
+#   # Or pipe paths:
+#   cat /tmp/error_blobs.txt | python -m tools.errors_blobs_to_pg --dry-run
+#
+# Notes:
+# - Uses modules.incidents.summarize_blob() to produce a single incident dict per blob:
+#       {"content": str, "source": str, "severity": str, "ts": Optional[str]}
+# - If modules.incidents.store_single(...) exists, we’ll use it; otherwise we fall back to a local inserter.
 
-Env / CLI:
-  --conn BLOB_CONN            (Azure Blob connection string)                [required]
-  --container BLOB_CONTAINER  (e.g., raw-logs)                              [default: raw-logs]
-  --paths-file PATHS_FILE     (newline-separated blob paths)                [required]
-  --min-level LEVEL           (DEBUG|INFO|WARNING|ERROR|CRITICAL)           [default: WARNING]
-  --keep-internal             (keep site-packages frames in snippet)        [default: False]
-  --dry-run                   (preview only, no POST)                       [default: False]
-  --rag-url RAG_WORKER_URL    (e.g., https://rag-worker... )                [env RAG_WORKER_URL]
-  --rag-token RAG_WORKER_TOKEN(Bearer token if you enforce auth)            [env RAG_WORKER_TOKEN]
-  --batch-size N              (#docs per POST)                              [default: 32]
-  --timeout SECS              (POST timeout)                                [default: 10]
+from __future__ import annotations
 
-Notes:
-- Generates id as sha1(source + content + blob_path) for dedupe
-- ts comes from the blob record when present, else now()
-- severity kept as the normalized string (ERROR/WARNING/...)
-"""
-
-import os, sys, json, hashlib, argparse
+import os
+import sys
+import json
+import argparse
+import logging
 from datetime import datetime, timezone
-from typing import Dict, Any, Iterable, List, Tuple, Optional
+from typing import Iterable, List, Optional, Tuple
 
-import httpx
+# Azure Blob
 from azure.storage.blob import BlobServiceClient
 
-LEVEL_MAP = {
-    "DEBUG": 10, "INFO": 20, "WARNING": 30, "WARN": 30, "ERROR": 40, "CRITICAL": 50, "FATAL": 50
-}
+# Postgres (psycopg v3)
+import psycopg
 
-def _utc_iso(dt: Optional[datetime]=None) -> str:
-    return (dt or datetime.now(timezone.utc)).isoformat()
+# Your incident module (v3 logic)
+try:
+    from modules.incidents import summarize_blob as inc_summarize_blob
+except Exception as e:
+    print(f"FATAL: modules.incidents.summarize_blob not importable: {e}", file=sys.stderr)
+    sys.exit(2)
 
-def _sha1_id(*parts: str) -> str:
-    h = hashlib.sha1()
-    for p in parts:
-        h.update(p.encode("utf-8", errors="ignore"))
-    return h.hexdigest()
+try:
+    from modules.incidents import store_single as inc_store_single  # optional
+except Exception:
+    inc_store_single = None
 
-def _coerce_level(v: Any) -> Tuple[str, int]:
-    """Return (LEVEL_STR, RANK). Handles strings/ints/None."""
-    if isinstance(v, int):
-        # map 0..50-ish to buckets
-        if v >= 50: return "CRITICAL", 50
-        if v >= 40: return "ERROR", 40
-        if v >= 30: return "WARNING", 30
-        if v >= 20: return "INFO", 20
-        return "DEBUG", 10
-    s = str(v or "").strip().upper()
-    if s in LEVEL_MAP: return s if s != "WARN" else "WARNING", LEVEL_MAP["WARNING" if s=="WARN" else s]
-    # heuristics from message text
-    return "ERROR", 40 if "ERROR" in s else ("WARNING", 30)[0=="__never__"]  # default ERROR if unknown
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format='{"asctime":"%(asctime)s","level":"%(levelname)s","msg":"%(message)s"}',
+)
+log = logging.getLogger("errors_blobs_to_pg")
 
-def _iter_jsonl_bytes(raw: bytes) -> Iterable[Dict[str, Any]]:
-    # Accepts full blob bytes, yields dict records
-    txt = raw.decode("utf-8", errors="ignore")
-    for line in txt.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            yield json.loads(line)
-        except Exception:
-            # wrap non-json as message
-            yield {"message": line}
+# --------------------------
+# Helpers
+# --------------------------
+def _now_utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
-def _is_tb_header(line: str) -> bool:
-    return line.strip().startswith("Traceback (most recent call last):")
+def _pg_connect() -> psycopg.Connection:
+    # Prefer DATABASE_URL if present, else build from PG* env
+    dsn = os.getenv("DATABASE_URL")
+    if not dsn:
+        host = os.getenv("PGHOST", "localhost")
+        port = os.getenv("PGPORT", "5432")
+        user = os.getenv("PGUSER", "postgres")
+        pwd  = os.getenv("PGPASSWORD", "")
+        db   = os.getenv("PGDATABASE", "postgres")
+        dsn = f"host={host} port={port} dbname={db} user={user} password={pwd}"
+    return psycopg.connect(dsn, autocommit=True)
 
-def _is_internal_frame(line: str) -> bool:
-    return '"/usr/local/lib/python' in line or "/site-packages/" in line
-
-def _is_app_frame(line: str) -> bool:
-    return 'File "/app/' in line
-
-def _first_non_empty(*candidates: Optional[str]) -> Optional[str]:
-    for c in candidates:
-        if c and str(c).strip():
-            return str(c).strip()
-    return None
-
-def _extract_props_log(rec: Dict[str, Any]) -> Optional[str]:
-    props = rec.get("properties") or rec.get("Properties") or {}
-    if isinstance(props, dict):
-        v = props.get("Log") or props.get("log")
-        if isinstance(v, str) and v.strip():
-            return v
-    # fall back to top-level message/msg
-    m = rec.get("message") or rec.get("msg")
-    return m if isinstance(m, str) else None
-
-def _normalize_ts(rec: Dict[str, Any]) -> Optional[str]:
-    cand = _first_non_empty(
-        rec.get("time"), rec.get("timestamp"), rec.get("timeGenerated"), rec.get("ts")
+def _insert_local(conn: psycopg.Connection, content: str, source: str, severity: Optional[str], ts: Optional[str]) -> int:
+    """
+    Minimal local insert. Assumes documents(id, source, ts, severity, content, embedding, ttl)
+    where:
+      - id is TEXT PK
+      - ts is NOT NULL (we default to now() when missing)
+      - severity is TEXT (nullable)
+      - embedding is nullable
+      - ttl is integer default (nullable)
+    """
+    cur = conn.cursor()
+    # Use sha1-like stable id made in SQL for simplicity
+    # If your table already has ON CONFLICT DO UPDATE, this is idempotent.
+    sql = """
+    INSERT INTO documents (id, source, ts, severity, content, embedding, ttl)
+    VALUES (
+      encode(digest(%s || '|' || coalesce(%s, now()::text) || '|' || %s, 'sha1'),'hex'),
+      %s,
+      coalesce(%s::timestamptz, now()),
+      %s,
+      %s,
+      NULL,
+      2
     )
-    if not cand:
-        return None
-    try:
-        # Accept both 'Z' and +00:00
-        if cand.endswith("Z"):
-            cand = cand[:-1] + "+00:00"
-        datetime.fromisoformat(cand)
-        return cand if cand.endswith("Z") else cand  # keep as-is
-    except Exception:
-        return None
-
-def _normalize_source(rec: Dict[str, Any]) -> str:
-    cat = rec.get("category") or rec.get("Category")
-    app = rec.get("ContainerAppName") or rec.get("app") or rec.get("source")
-    if cat and app: return f"{app}/{cat}"
-    return str(cat or app or "ContainerAppConsoleLogs")
-
-def _stitch_episodes(records: List[Dict[str, Any]]) -> List[List[str]]:
+    ON CONFLICT (id) DO NOTHING
     """
-    Group consecutive log lines into episodes using 'Traceback...' separators.
-    Return list of episodes; each episode is a list of lines (strings).
-    """
-    episodes: List[List[str]] = []
-    cur: List[str] = []
-    for rec in records:
-        line = _extract_props_log(rec)
-        if not line: 
-            continue
-        if _is_tb_header(line) and cur:
-            # new traceback starts, close previous
-            episodes.append(cur)
-            cur = [line]
-        else:
-            cur.append(line)
-    if cur:
-        episodes.append(cur)
-    return episodes
+    cur.execute(sql, (source, ts, content, source[:128], ts, severity, content[:5000]))
+    return cur.rowcount or 0
 
-def _format_incident(ep_lines: List[str], keep_internal: bool=False) -> str:
-    """
-    Create concise content:
-      - Headline = the first strong error line (often the exception line before the traceback)
-      - Snippet  = minimal traceback lines; prefer /app/ frames; suppress internal frames unless asked
-    """
-    # Headline = first line containing an Exception/ERROR-ish if present
-    headline = None
-    for s in ep_lines:
-        if "Error" in s or "Exception" in s or "ERROR" in s or "CRITICAL" in s:
-            headline = s.strip()
-            break
-    headline = headline or "n/a"
+def _read_paths(args: argparse.Namespace) -> List[str]:
+    paths: List[str] = []
+    if args.paths_file:
+        with open(args.paths_file, "r", encoding="utf-8") as f:
+            for line in f:
+                p = line.strip()
+                if p:
+                    paths.append(p)
+    else:
+        # read from stdin
+        for line in sys.stdin:
+            p = line.strip()
+            if p:
+                paths.append(p)
+    return paths
 
-    # Snippet – keep the traceback header and relevant frames
-    snippet_lines: List[str] = []
-    seen_tb = False
-    for s in ep_lines:
-        if _is_tb_header(s):
-            seen_tb = True
-            snippet_lines.append("Traceback (most recent call last):")
-            continue
-        if not seen_tb:
-            continue  # only after TB header
+def _bool_env(name: str, default: bool = False) -> bool:
+    v = os.getenv(name)
+    if v is None:
+        return default
+    return v.strip() not in ("0", "false", "False", "")
 
-        # Keep app frames, drop internal unless keep_internal=True
-        if _is_app_frame(s) or keep_internal:
-            snippet_lines.append(s)
-
-        # also keep the final exception lines following frames
-        if not s.startswith('  File "') and ("Error" in s or "Exception" in s):
-            snippet_lines.append(s)
-
-    return f"Headline: {headline}\nSnippet:\n" + ("\n".join(snippet_lines) if snippet_lines else "(none)")
-
-def _incidents_from_blob_bytes(raw: bytes, min_level: str="WARNING", keep_internal: bool=False) -> List[Dict[str, Any]]:
-    recs = list(_iter_jsonl_bytes(raw))
-    # Filter to only console/system logs that carry properties.Log/message
-    filtered = [r for r in recs if _extract_props_log(r)]
-    if not filtered:
-        return []
-    # level gate (use the max level across lines of an episode later)
-    episodes = _stitch_episodes(filtered)
-    out: List[Dict[str, Any]] = []
-    for ep in episodes:
-        # compute source/ts/level from the lines that have them
-        lvl_rank = 0
-        lvl_str = "INFO"
-        src = "ContainerAppConsoleLogs"
-        ts = None
-        for rec in filtered:
-            p = _extract_props_log(rec)
-            if not p: 
-                continue
-            # naive membership; if needed you can improve by indexing
-            if p in ep:
-                s, r = _coerce_level(rec.get("level") or rec.get("Level") or rec.get("severity"))
-                if r > lvl_rank: lvl_str, lvl_rank = s, r
-                s2 = _normalize_source(rec)
-                src = s2 or src
-                ts = ts or _normalize_ts(rec)
-
-        if lvl_rank < LEVEL_MAP.get(min_level.upper(), 30):
-            continue
-
-        content = _format_incident(ep, keep_internal=keep_internal)
-        out.append({"source": src, "ts": ts, "severity": lvl_str, "content": content})
-    return out
-
-def _post_docs(rag_url: str, token: Optional[str], docs: List[Dict[str, Any]], timeout: float=10.0) -> bool:
-    ing_url = rag_url.rstrip("/") + "/v1/ingest"
-    headers = {"content-type":"application/json"}
-    if token:
-        headers["authorization"] = f"Bearer {token}"
-    with httpx.Client(timeout=timeout) as http:
-        resp = http.post(ing_url, json={"documents": docs}, headers=headers)
-        ok = 200 <= resp.status_code < 300
-        if not ok:
-            body = resp.text[:400]
-            print(f"[ingest] status={resp.status_code} body={body}")
-        else:
-            print(f"[ingest] inserted={len(docs)}")
-        return ok
-
+# --------------------------
+# Main
+# --------------------------
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--conn", required=True, help="Azure Blob connection string")
-    ap.add_argument("--container", default="raw-logs", help="Blob container name")
-    ap.add_argument("--paths-file", required=True, help="Text file with newline-separated blob paths")
-    ap.add_argument("--min-level", default="WARNING", help="Min level to keep (DEBUG|INFO|WARNING|ERROR|CRITICAL)")
-    ap.add_argument("--keep-internal", action="store_true", help="Keep site-packages frames in snippet")
-    ap.add_argument("--dry-run", action="store_true", help="Preview only, no POST")
-    ap.add_argument("--rag-url", default=os.getenv("RAG_WORKER_URL", ""), help="rag-worker base URL")
-    ap.add_argument("--rag-token", default=os.getenv("RAG_WORKER_TOKEN", ""), help="Bearer token if any")
-    ap.add_argument("--batch-size", type=int, default=32)
-    ap.add_argument("--timeout", type=float, default=10.0)
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser(description="Summarize error blobs and insert into Postgres.")
+    parser.add_argument("--paths-file", help="File containing blob paths (one per line). If not set, read from stdin.")
+    parser.add_argument("--conn", default=os.getenv("BLOB_CONN", ""), help="Azure Blob connection string")
+    parser.add_argument("--container", default=os.getenv("BLOB_CONTAINER", "raw-logs"), help="Blob container name")
+    parser.add_argument("--min-level", default=os.getenv("MIN_LEVEL", "WARNING"), help="Minimum severity gate (e.g., WARNING, ERROR)")
+    parser.add_argument("--keep-internal", action="store_true", default=_bool_env("KEEP_INTERNAL", False), help="Keep internal frames (/site-packages).")
+    parser.add_argument("--uplift-first-frames", action="store_true", default=_bool_env("UPLIFT_FIRST_FRAMES", True), help="Boost first user frames near the head.")
+    parser.add_argument("--dry-run", action="store_true", help="Do not insert into Postgres; just preview.")
+    parser.add_argument("--source-override", default=None, help="Override 'source' field for all incidents.")
+    args = parser.parse_args()
 
-    if not args.dry_run and not args.rag_url:
-        print("ERROR: --rag-url (or env RAG_WORKER_URL) is required when not --dry-run")
+    if not args.conn:
+        log.error(json.dumps({"msg":"missing blob connection string (--conn or BLOB_CONN)"}))
         sys.exit(2)
 
-    bsc = BlobServiceClient.from_connection_string(args.conn)
-    cc = bsc.get_container_client(args.container)
-    paths = [p.strip() for p in open(args.paths_file, "r", encoding="utf-8").read().splitlines() if p.strip()]
+    blob_paths = _read_paths(args)
+    if not blob_paths:
+        log.warning(json.dumps({"msg":"no blob paths provided"}))
+        return
 
-    print(f"[run] blobs={len(paths)} min_level={args.min_level} dry_run={args.dry_run}")
+    log.info(json.dumps({
+        "msg": "begin",
+        "count_paths": len(blob_paths),
+        "container": args.container,
+        "min_level": args.min_level,
+        "uplift_first_frames": args.uplift_first_frames,
+        "keep_internal": args.keep_internal,
+        "dry_run": args.dry_run
+    }))
 
-    staged: List[Dict[str, Any]] = []
-    total = 0
-    for i, blob in enumerate(paths, 1):
+    blob_svc = BlobServiceClient.from_connection_string(args.conn)
+
+    inserted = 0
+    processed = 0
+
+    # Postgres connection (only if not dry-run)
+    conn = None
+    if not args.dry_run:
         try:
-            raw = cc.download_blob(blob).readall()
+            conn = _pg_connect()
         except Exception as e:
-            print(f"[warn] failed to download {blob}: {e}")
+            log.error(json.dumps({"msg":"pg connect failed","err":str(e)}))
+            sys.exit(2)
+
+    for i, path in enumerate(blob_paths, 1):
+        processed += 1
+        try:
+            # Use the v3 summarizer from modules.incidents
+            # It should return either None (no incident) or a dict:
+            #   {"content": str, "source": str, "severity": str, "ts": Optional[str]}
+            incident = inc_summarize_blob(
+                blob_svc=blob_svc,
+                container=args.container,
+                blob_path=path,
+                min_level=args.min_level,
+                uplift_first_frames=args.uplift_first_frames,
+                keep_internal=args.keep_internal,
+            )
+        except TypeError:
+            # backward-compat call signature (if module was older)
+            incident = inc_summarize_blob(
+                blob_svc, args.container, path, args.min_level, args.uplift_first_frames, args.keep_internal
+            )
+        except Exception as e:
+            log.warning(json.dumps({"msg":"summarize failed","blob":path,"err":str(e)}))
             continue
 
-        incidents = _incidents_from_blob_bytes(
-            raw, min_level=args.min_level, keep_internal=args.keep_internal
-        )
-        if not incidents:
-            print(f"[{i}/{len(paths)}] {blob} -> 0 incidents")
+        if not incident:
+            log.info(json.dumps({"msg":"no-incident","blob":path}))
             continue
 
-        docs = []
-        for inc in incidents:
-            source = inc["source"] or "ContainerAppConsoleLogs"
-            ts = inc.get("ts") or _utc_iso()
-            content = (inc.get("content") or "").strip()
-            severity = inc.get("severity") or "ERROR"
-            _id = _sha1_id(source, content[:200], blob)  # stable dedupe id
-            docs.append({
-                "id": _id,
-                "source": source[:128],
-                "ts": ts,
-                "severity": severity,
-                "content": content[:5000],
-            })
+        # Normalize fields
+        content: str = (incident.get("content") or "").strip()
+        source: str = (args.source_override or incident.get("source") or "ContainerAppConsoleLogs")[:128]
+        severity: Optional[str] = (incident.get("severity") or None)
+        ts: Optional[str] = incident.get("ts") or None
 
         if args.dry_run:
-            print(f"\n--- DRY-RUN {i}/{len(paths)}: {blob} ---")
-            for d in docs:
-                print(f"source={d['source']} severity={d['severity']} ts={d['ts']}\n{d['content'][:600]}\n")
-        else:
-            staged.extend(docs)
-            if len(staged) >= args.batch_size:
-                if not _post_docs(args.rag_url, args.rag_token, staged, timeout=args.timeout):
-                    print("[err] POST failed; stopping")
-                    sys.exit(1)
-                total += len(staged)
-                staged = []
+            print("\n--- DRY-RUN PREVIEW ---")
+            print(f"blob={path}")
+            print(f"source={source} severity={severity} ts={ts}")
+            print("CONTENT:\n" + (content if content else "(no content)"))
+            continue
 
-    if not args.dry_run and staged:
-        if not _post_docs(args.rag_url, args.rag_token, staged, timeout=args.timeout):
-            print("[err] final POST failed")
-            sys.exit(1)
-        total += len(staged)
+        # Store using module helper if available, else local insert
+        try:
+            if inc_store_single is not None:
+                # store_single(conn, content, source, severity, ts=None) -> int
+                n = inc_store_single(conn, content, source, severity, ts)
+            else:
+                n = _insert_local(conn, content, source, severity, ts)
+            inserted += n
+            log.info(json.dumps({"msg":"stored","blob":path,"rows":n}))
+        except Exception as e:
+            log.error(json.dumps({"msg":"store failed","blob":path,"err":str(e)}))
 
-    print(f"[done] total prepared docs: {total if not args.dry_run else 'DRY-RUN only'}")
+    if conn:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    log.info(json.dumps({"msg":"done","processed":processed,"inserted":inserted}))
 
 if __name__ == "__main__":
     main()
