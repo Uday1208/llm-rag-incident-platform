@@ -285,14 +285,15 @@ def main() -> None:
 
     if args.out:
         try:
-            with open(args.out, "w", encoding="utf-8") as f:
-                json.dump(metrics, f, indent=2, ensure_ascii=False)
+            if args.list_error_blobs:
+                # One path per line; easy to pipe into other tools/scripts
+                for p in sorted(error_like_blobs):
+                    print(p)
+            else:
+                with open(args.out, "w", encoding="utf-8") as f:
+                    json.dump(metrics, f, indent=2, ensure_ascii=False)
         except Exception as e:
             print(f"[WARN] could not write {args.out}: {e}", file=sys.stderr)
-
-    # One path per line; easy to pipe into other tools/scripts
-    for p in sorted(error_like_blobs):
-        print(p)
 
     if args.exit_on_error and metrics.get("error_like", 0) > 0:
         sys.exit(2)
