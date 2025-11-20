@@ -281,17 +281,17 @@ def main() -> None:
     )
 
     # Pretty print summary
-    print(json.dumps(metrics, indent=2, ensure_ascii=False))
+    #print(json.dumps(metrics, indent=2, ensure_ascii=False))
 
-    if args.out:
-        try:
-            if args.list_error_blobs:
+    if args.list_error_blobs:
                 # One path per line; easy to pipe into other tools/scripts
                 for p in sorted(error_like_blobs):
                     print(p)
-            else:
-                with open(args.out, "w", encoding="utf-8") as f:
-                    json.dump(metrics, f, indent=2, ensure_ascii=False)
+
+    if args.out:
+        try:
+            with open(args.out, "w", encoding="utf-8") as f:
+                json.dump(metrics, f, indent=2, ensure_ascii=False)
         except Exception as e:
             print(f"[WARN] could not write {args.out}: {e}", file=sys.stderr)
 
