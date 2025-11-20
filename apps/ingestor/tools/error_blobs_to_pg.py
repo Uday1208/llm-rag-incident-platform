@@ -1,6 +1,7 @@
 # tools/error_blobs_to_pg.py
 # Reads blob paths (one per line) from --list file, downloads each JSONL blob,
-# summarizes with modules.incidents.summarize_blob, and INSERTs into Postgres.
+# summarizes with modules.incidents.summarize_blob (returns List[dict]),
+# inserts into Postgres via psycopg2.
 #
 # Env Vars:
 #   BLOB_CONN        : Azure Blob Storage connection string
@@ -9,12 +10,7 @@
 #
 # Usage:
 #   python -m tools.error_blobs_to_pg --list error_blobs.txt \
-#     --min-level WARNING --uplift --keep-internal false --dry-run
-#
-# Notes:
-#   - Expects each line in --list to be a blob path like: eh/0/....jsonl
-#   - We only write (id, source, ts, severity, content); other cols left NULL.
-#   - ts is required by your schema; if absent from summary, we set now(UTC).
+#     --min-level WARNING --dry-run
 
 import os
 import sys
@@ -23,44 +19,29 @@ import argparse
 import logging
 import hashlib
 from datetime import datetime, timezone
-from typing import Iterable, Optional
+from typing import Iterable, Optional, List, Tuple
 
 import psycopg2
 from psycopg2.extras import execute_batch
-
 from azure.storage.blob import BlobServiceClient
-from modules.incidents import summarize_blob  # uses current signature (keyword-only opts)
+
+from modules.incidents import summarize_blob  # signature: (blob_text: str, *, min_level: str="WARNING") -> List[dict]
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL, logging.INFO),
-    format='%(levelname)s %(message)s'
-)
+logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format="%(levelname)s %(message)s")
 log = logging.getLogger("error_blobs_to_pg")
 
 
-# ---------------- helpers ----------------
+# ------------ helpers ------------
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-def _sha1(*parts: str) -> str:
-    h = hashlib.sha1()
-    for p in parts:
-        h.update(p.encode("utf-8", errors="ignore"))
-    return h.hexdigest()
-
-def _parse_bool(s: Optional[str], default: bool) -> bool:
-    if s is None:
-        return default
-    return str(s).strip().lower() in ("1", "true", "yes", "y", "on")
 
 def _parse_ts(value: Optional[str]) -> datetime:
     """Parse ISO8601 or fallback to now(UTC)."""
     if not value:
         return datetime.now(timezone.utc)
     try:
-        # handle trailing 'Z'
         v = value.replace("Z", "+00:00")
         dt = datetime.fromisoformat(v)
         if dt.tzinfo is None:
@@ -69,13 +50,18 @@ def _parse_ts(value: Optional[str]) -> datetime:
     except Exception:
         return datetime.now(timezone.utc)
 
+def _sha1(*parts: str) -> str:
+    h = hashlib.sha1()
+    for p in parts:
+        h.update(p.encode("utf-8", errors="ignore"))
+    return h.hexdigest()
+
 def _iter_blob_paths(pathfile: str) -> Iterable[str]:
     with open(pathfile, "r", encoding="utf-8") as fh:
         for line in fh:
             s = line.strip()
             if not s or s.startswith("#"):
                 continue
-            # allow JSON-quoted or raw
             if s.startswith('"') and s.endswith('"'):
                 s = s[1:-1]
             yield s
@@ -84,7 +70,6 @@ def _open_pg():
     dsn = os.getenv("DATABASE_URL")
     if dsn:
         return psycopg2.connect(dsn)
-    # fallback individual envs
     return psycopg2.connect(
         host=os.getenv("PGHOST", "localhost"),
         port=int(os.getenv("PGPORT", "5432")),
@@ -93,8 +78,8 @@ def _open_pg():
         password=os.getenv("PGPASSWORD", ""),
     )
 
-def _insert_rows(rows):
-    """rows: sequence of (id, source, ts, severity, content)"""
+def _insert_rows(rows: List[Tuple[str, str, datetime, Optional[str], str]]) -> int:
+    """rows: (id, source, ts, severity, content)"""
     if not rows:
         return 0
     sql = """
@@ -111,39 +96,35 @@ def _insert_rows(rows):
         conn.close()
 
 
-# ---------------- main flow ----------------
+# ------------ main ------------
 
 def main():
-    ap = argparse.ArgumentParser(description="Summarize error blobs and write to Postgres.")
+    ap = argparse.ArgumentParser(description="Summarize error blobs and write incidents to Postgres.")
     ap.add_argument("--list", required=True, help="Path to file containing blob paths (one per line).")
     ap.add_argument("--min-level", default=os.getenv("MIN_LEVEL", "WARNING"),
                     help="Minimum severity to keep: DEBUG|INFO|WARNING|ERROR|CRITICAL")
-    ap.add_argument("--uplift", default=_parse_bool(os.getenv("UPLIFT"), True), type=lambda s: _parse_bool(s, True),
-                    help="Promote noisy stacks to headline (default true).")
-    ap.add_argument("--keep-internal", default=_parse_bool(os.getenv("KEEP_INTERNAL"), False), type=lambda s: _parse_bool(s, False),
-                    help="Keep site-packages frames; default false (drop).")
-    ap.add_argument("--dry-run", action="store_true", help="Do not write to Postgres; print preview only.")
+    ap.add_argument("--dry-run", action="store_true", help="Preview inserts without writing to Postgres.")
     args = ap.parse_args()
 
     blob_conn = os.getenv("BLOB_CONN", "")
     container = os.getenv("BLOB_CONTAINER", "raw-logs")
-
     if not blob_conn:
         log.error("BLOB_CONN is required")
         sys.exit(2)
-
-    bsc = BlobServiceClient.from_connection_string(blob_conn)
-    cont = bsc.get_container_client(container)
 
     paths = list(_iter_blob_paths(args.list))
     if not paths:
         log.info("No blob paths in --list")
         return
 
-    log.info(f"[start] blobs={len(paths)} min_level={args.min_level} uplift={args.uplift} keep_internal={args.keep_internal} dry_run={args.dry_run}")
+    bsc = BlobServiceClient.from_connection_string(blob_conn)
+    cont = bsc.get_container_client(container)
 
-    to_insert = []
-    total_kept = 0
+    log.info(f"[start] blobs={len(paths)} min_level={args.min_level} dry_run={args.dry_run}")
+
+    to_insert: List[Tuple[str, str, datetime, Optional[str], str]] = []
+    preview_count = 0
+    total_found = 0
 
     for i, blob_path in enumerate(paths, 1):
         try:
@@ -153,37 +134,38 @@ def main():
             log.warning(f"[{i}/{len(paths)}] download failed: {blob_path} err={e}")
             continue
 
-        # summarize_blob returns a single incident dict or None
-        incident = summarize_blob(
-            text,
-            min_level=args.min_level,
-            uplift=args.uplift,
-            keep_internal=args.keep_internal,
-        )
+        try:
+            incidents = summarize_blob(text, min_level=args.min_level)  # <- current signature
+        except TypeError as e:
+            log.error(f"[{i}/{len(paths)}] summarize_blob signature mismatch: {e}")
+            continue
+        except Exception as e:
+            log.warning(f"[{i}/{len(paths)}] summarize_blob error: {e}")
+            continue
 
-        if not incident:
+        if not incidents:
             log.info(f"[{i}/{len(paths)}] no incident found: {blob_path}")
             continue
 
-        # Ensure minimal fields and generate stable id
-        source = (incident.get("source") or "ContainerAppConsoleLogs")[:128]
-        ts_iso = incident.get("ts") or _now_iso()
-        ts = _parse_ts(ts_iso)
-        severity = incident.get("severity")
-        content = incident.get("content") or ""
+        for inc in incidents:
+            total_found += 1
+            source = (inc.get("source") or "ContainerAppConsoleLogs")[:128]
+            ts_iso = inc.get("ts") or _now_iso()
+            ts_dt = _parse_ts(ts_iso)
+            severity = inc.get("severity")
+            content = inc.get("content") or ""
 
-        inc_id = incident.get("id") or _sha1(source, ts_iso, content)
+            inc_id = inc.get("id") or _sha1(source, ts_iso, content)
 
-        total_kept += 1
-
-        if args.dry_run:
-            preview = content[:600].rstrip()
-            log.info(f"\n--- DRY-RUN #{total_kept} ---\nsource={source} severity={severity} ts={ts_iso}\nCONTENT:\n{preview}\n")
-        else:
-            to_insert.append((inc_id, source, ts, severity, content))
+            if args.dry_run:
+                preview_count += 1
+                sample = content[:600].rstrip()
+                log.info(f"\n--- DRY-RUN #{preview_count} ---\nsource={source} severity={severity} ts={ts_iso}\nCONTENT:\n{sample}\n")
+            else:
+                to_insert.append((inc_id, source, ts_dt, severity, content))
 
     if args.dry_run:
-        log.info(f"[done] incidents previewed: {total_kept}")
+        log.info(f"[done] incidents previewed: {preview_count} (from {total_found} found)")
         return
 
     wrote = _insert_rows(to_insert)
