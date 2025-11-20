@@ -71,11 +71,11 @@ def _open_pg():
     if dsn:
         return psycopg2.connect(dsn)
     return psycopg2.connect(
-        host=os.getenv("PGHOST", "localhost"),
+        host=os.getenv("PG_HOST", "localhost"),
         port=int(os.getenv("PGPORT", "5432")),
-        dbname=os.getenv("PGDATABASE", "postgres"),
-        user=os.getenv("PGUSER", "postgres"),
-        password=os.getenv("PGPASSWORD", ""),
+        dbname=os.getenv("PG_DB", "postgres"),
+        user=os.getenv("PG_USER", "postgres"),
+        password=os.getenv("PG_PASS", ""),
     )
 
 def _insert_rows(rows: List[Tuple[str, str, datetime, Optional[str], str]]) -> int:
