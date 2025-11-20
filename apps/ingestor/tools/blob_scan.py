@@ -26,6 +26,10 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from azure.storage.blob import BlobServiceClient
 
+# --- NEW: imports (top of file) ---
+import json
+from pathlib import Path
+
 # -------------- Patterns & severities --------------
 
 # Common message substrings/patterns that indicate failure
@@ -196,6 +200,8 @@ def scan_container(
         d[k] = d.get(k, 0) + 1
 
     scanned = 0
+    error_like_blobs = set()
+    
     for blob in cont.list_blobs(name_starts_with=prefix):
         if since and blob.last_modified and blob.last_modified.replace(tzinfo=timezone.utc) < since:
             continue
@@ -222,6 +228,7 @@ def scan_container(
 
             is_err, why = _looks_like_error(rec)
             if is_err:
+                error_like_blobs.add(blob.name)
                 metrics["error_like"] += 1
                 if print_samples and len(metrics["samples"]) < print_samples:
                     metrics["samples"].append({
@@ -234,11 +241,11 @@ def scan_container(
                 metrics["warning_like"] += 1
 
             if limit and metrics["scanned_records"] >= limit:
-                return metrics
+                return metrics, error_like_blobs
 
         scanned += 1
 
-    return metrics
+    return metrics, error_like_blobs
 
 # -------------- CLI --------------
 
@@ -253,6 +260,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--print-samples", type=int, default=5, help="Print up to N example error-like records")
     p.add_argument("--out", default=None, help="Write metrics JSON to this file")
     p.add_argument("--exit-on-error", action="store_true", help="Exit code 2 if any error-like records found")
+    p.add_argument("--list-error-blobs", action="store_true", help="Print blob paths that contain at least one error-like record.")
     return p.parse_args()
 
 def main() -> None:
@@ -263,7 +271,7 @@ def main() -> None:
         sys.exit(1)
 
     since_dt = _iso_to_dt(args.since) if args.since else None
-    metrics = scan_container(
+    metrics, error_like_blobs = scan_container(
         conn_str=args.conn,
         container=args.container,
         prefix=args.prefix,
@@ -281,6 +289,10 @@ def main() -> None:
                 json.dump(metrics, f, indent=2, ensure_ascii=False)
         except Exception as e:
             print(f"[WARN] could not write {args.out}: {e}", file=sys.stderr)
+
+    # One path per line; easy to pipe into other tools/scripts
+    for p in sorted(error_like_blobs):
+        print(p)
 
     if args.exit_on_error and metrics.get("error_like", 0) > 0:
         sys.exit(2)
