@@ -23,6 +23,7 @@ try:
     )
     from modules.eh_consumer import get_consumer, decode_event_items
     from modules.forwarder import get_http_client, post_docs
+    from modules.incidents import summarize_from_lines
 except ImportError:
     from .modules.archive import get_blob_client, archive_raw
     from .modules.normalize import (
@@ -31,6 +32,7 @@ except ImportError:
     )
     from .modules.eh_consumer import get_consumer, decode_event_items
     from .modules.forwarder import get_http_client, post_docs
+    from .modules.incidents import summarize_from_lines
 
 # -----------------------
 # Environment (UNCHANGED NAMES)
@@ -61,6 +63,8 @@ ALLOW_CATEGORIES = set(
     (os.getenv("ALLOW_CATEGORIES") or "ContainerAppConsoleLogs,ContainerAppSystemLogs").split(",")
 )
 
+INCIDENT_SUMMARY = (os.getenv("INCIDENT_SUMMARY","1") == "1")  # enable one-incident-per-event
+MIN_LEVEL = (os.getenv("MIN_LEVEL") or "WARNING").upper()      # already used in your tool; optional here
 # -----------------------
 # Logging (JSON-ish)
 # -----------------------
@@ -172,57 +176,131 @@ async def run_consumer():
     async def on_event(partition_context, event) -> None:
         nonlocal batch, batch_deadline
         global EVENTS_TOTAL, NORMALIZED_TOTAL, SKIPPED_METRICS_TOTAL, FORWARDED_TOTAL, DROPPED_BY_LEVEL_TOTAL
-
+    
+        # Decode EH payload -> (list[dict], raw_text)
         items, raw_text = decode_event_items(event)
         part = getattr(partition_context, "partition_id", "0") or "0"
         EVENTS_TOTAL += len(items)
-
-        '''norm: List[Dict[str, Any]] = []
-        skipped_metrics = 0
+    
+        # ---------- INCIDENT SUMMARY FAST PATH ----------
+        # Build console "lines" from the raw records and summarize to ONE incident.
+        # If enabled, we post that single doc and skip per-line forwarding for this event.
+        if INCIDENT_SUMMARY:
+            # turn records into lines (prefer properties.Log / message fields)
+            lines: List[str] = []
+            for it in items:
+                msg = it.get("message") or it.get("msg")
+                if not msg:
+                    props = it.get("properties") or it.get("log")
+                    if isinstance(props, dict):
+                        if isinstance(props.get("Log"), str):
+                            msg = props["Log"]
+                        else:
+                            # prefer some common keys before falling back to compact JSON
+                            msg = (
+                                props.get("Details")
+                                or props.get("detail")
+                                or props.get("error")
+                                or props.get("ExceptionMessage")
+                                or props.get("Message")
+                                or props.get("msg")
+                            )
+                            if not msg:
+                                try:
+                                    msg = json.dumps(props, ensure_ascii=False)
+                                except Exception:
+                                    msg = str(props)
+                    elif isinstance(props, str):
+                        msg = props
+                if msg:
+                    if isinstance(msg, str):
+                        lines.extend(msg.splitlines())
+                    else:
+                        lines.append(str(msg))
+    
+            # Always archive raw for replay/debug even if no incident is produced
+            if blob_svc and raw_text:
+                try:
+                    await archive_raw(
+                        blob_svc=blob_svc,
+                        container=BLOB_CONTAINER,
+                        prefix=RAW_PREFIX,
+                        partition_id=part,
+                        lines=[raw_text],
+                    )
+                except Exception as e:
+                    log.warning(json.dumps({"msg": "archive error", "err": str(e), "partition": part}))
+    
+            # Summarize → ONE incident doc
+            inc = summarize_from_lines(lines, min_level=MIN_LEVEL)
+            if inc and RAG_INGEST_URL:
+                ok = await post_docs(http=http, url=RAG_INGEST_URL, docs=[inc], timeout=POST_TIMEOUT)
+                if ok:
+                    FORWARDED_TOTAL += 1
+    
+            # We handled this event (summarized or not). Checkpoint and return.
+            await partition_context.update_checkpoint(event)
+            return
+        # ---------- END INCIDENT SUMMARY FAST PATH ----------
+    
+        # -------- Existing per-record normalization path (unchanged) --------
+        norm: List[Dict[str, Any]] = []
         dropped_by_level = 0
-
+        skipped_metrics = 0
+    
         for it in items:
             if is_metric_payload(it):
                 skipped_metrics += 1
                 continue
-
-            # Optional: category gate (main filter is severity below)
-            cat = (it.get("category") or it.get("Category") or "").strip()
-            if ALLOW_CATEGORIES and cat and (cat not in ALLOW_CATEGORIES):
-                # Still allow free-form 'message' records even without category
-                if not ("message" in it or "msg" in it or "content" in it):
-                    continue
-
-            # Normalize to canonical shape {id, source, ts, content, severity?}
             doc = normalize_payload(it)
-            if not doc or not doc.get("content"):
+            if not doc:
                 continue
-
-            # Extract severity and apply threshold
-            level_name, level_no = extract_severity(it, fallback=doc.get("severity"))
-            if level_no < FORWARD_MIN_NUM:
+            if doc.pop("_dropped_by_level", False):
                 dropped_by_level += 1
                 continue
-
-            source = str(doc.get("source") or cat or "unknown").strip()
-            ts_iso = utc_iso(doc.get("ts"))
-            content = str(doc.get("content"))[:5000]
-            doc_id = doc.get("id") or sha1_id(source, ts_iso, content)
-
-            # Optionally keep severity on the record for downstream analytics
-            doc_out = {
-                "id": doc_id,
-                "source": source[:128],
-                "ts": ts_iso,
-                "content": content,
-                "severity": level_name
-            }
-            norm.append(doc_out)
-
+            norm.append(doc)
+    
         NORMALIZED_TOTAL += len(norm)
         SKIPPED_METRICS_TOTAL += skipped_metrics
-        DROPPED_BY_LEVEL_TOTAL += dropped_by_level'''
+        DROPPED_BY_LEVEL_TOTAL += dropped_by_level
+    
+        # Archive raw JSONL for replay/debug
+        if blob_svc and raw_text:
+            try:
+                await archive_raw(
+                    blob_svc=blob_svc,
+                    container=BLOB_CONTAINER,
+                    prefix=RAW_PREFIX,
+                    partition_id=part,
+                    lines=[raw_text],
+                )
+            except Exception as e:
+                log.warning(json.dumps({"msg": "archive error", "err": str(e), "partition": part}))
+    
+        # Batch forwarding
+        if norm:
+            batch.extend(norm)
+    
+        now = asyncio.get_event_loop().time()
+        if len(batch) >= BATCH_MAX or now >= batch_deadline:
+            if batch and RAG_INGEST_URL:
+                docs = batch
+                batch = []
+                batch_deadline = now + BATCH_WINDOW
+                ok = await post_docs(http=http, url=RAG_INGEST_URL, docs=docs, timeout=POST_TIMEOUT)
+                if ok:
+                    FORWARDED_TOTAL += len(docs)
+    
+        await partition_context.update_checkpoint(event)
 
+    '''async def on_event(partition_context, event) -> None:
+        nonlocal batch, batch_deadline
+        global EVENTS_TOTAL, NORMALIZED_TOTAL, SKIPPED_METRICS_TOTAL, FORWARDED_TOTAL, DROPPED_BY_LEVEL_TOTAL
+
+        items, raw_text = decode_event_items(event)
+        part = getattr(partition_context, "partition_id", "0") or "0"
+        EVENTS_TOTAL += len(items)
+        
         # Normalize and filter
         norm: List[Dict[str, Any]] = []
         dropped_by_level = 0
@@ -273,7 +351,8 @@ async def run_consumer():
                 if ok:
                     FORWARDED_TOTAL += len(docs)
 
-        await partition_context.update_checkpoint(event)
+        await partition_context.update_checkpoint(event)'''
+    
 
     async with eh_client:
         try:
