@@ -78,8 +78,8 @@ def main():
     if not base:
         log.error("RAG_WORKER_URL is required")
         sys.exit(2)
-    #url = f"{base}/v1/ingest"
-    url = f"{base}"
+    url = f"{base}/v1/ingest"
+    #url = f"{base}"
 
     rows = _fetch_batch(args.limit)
     if not rows:
