@@ -20,7 +20,9 @@ Env:
 
 # apps/reasoning-agent/main.py
 from fastapi import FastAPI
-from routers.reason import router as reason_router
+#from routers.reason import router as reason_router
+from routers import reason_router, search_router
 
 app = FastAPI()
 app.include_router(reason_router)
+app.include_router(search_router)  # <-- add this
