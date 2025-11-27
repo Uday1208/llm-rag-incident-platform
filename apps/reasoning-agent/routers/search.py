@@ -3,7 +3,8 @@
 from typing import Optional, List
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, HTTPException
-from ..services.retrieval import embed_query, search_by_embedding
+#from ..services.retrieval import embed_query, search_by_embedding
+from services.retrieval import embed_query, search_by_embedding
 import os
 
 router = APIRouter(prefix="/v1", tags=["search"])
