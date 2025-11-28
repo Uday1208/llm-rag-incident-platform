@@ -18,6 +18,9 @@ async def search(inb: SearchIn) -> Dict[str, Any]:
         vec = await embed_query(inb.query)
         hits = await search_by_embedding(vec, top_k=inb.top_k)
         return {"query": inb.query, "results": hits}
+    except ValueError as e:
+        # worker contract mismatch → surface as 422 to client
+        raise HTTPException(status_code=422, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
