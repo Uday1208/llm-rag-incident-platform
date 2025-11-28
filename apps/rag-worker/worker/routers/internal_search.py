@@ -4,10 +4,11 @@ from pydantic import BaseModel, conlist
 import os
 import psycopg2
 from typing import List, Dict, Any
+from ..db import get_conn
 
 router = APIRouter(tags=["internal"])
 
-PG_CONN = os.getenv("PG_CONN", "")
+#PG_CONN = os.getenv("PG_CONN", "")
 EMBED_DIM = int(os.getenv("EMBED_DIM", "384"))
 
 class SearchIn(BaseModel):
@@ -16,8 +17,8 @@ class SearchIn(BaseModel):
 
 @router.post("/internal/search")
 def internal_search(inp: SearchIn) -> Dict[str, Any]:
-    if not PG_CONN:
-        raise HTTPException(status_code=500, detail="PG_CONN not configured")
+    '''if not PG_CONN:
+        raise HTTPException(status_code=500, detail="PG_CONN not configured")'''
     if len(inp.embedding) != EMBED_DIM:
         raise HTTPException(status_code=400, detail=f"embedding length {len(inp.embedding)} != EMBED_DIM {EMBED_DIM}")
 
@@ -29,8 +30,9 @@ def internal_search(inp: SearchIn) -> Dict[str, Any]:
     ORDER BY embedding <=> %s::vector
     LIMIT %s
     """
-    try:
-        with psycopg2.connect(PG_CONN) as conn, conn.cursor() as cur:
+    try:        
+        #with psycopg2.connect(PG_CONN) as conn, conn.cursor() as cur:
+        with get_conn() as conn, conn.cursor() as cur:
             cur.execute(sql, (inp.embedding, inp.embedding, inp.top_k))
             rows = cur.fetchall()
     except Exception as e:
