@@ -18,6 +18,8 @@ from .db import init_db_pool, close_db_pool, ensure_schema        # PG pool init
 from .embeddings import init_embedder, close_embedder             # load ST model; open/close Redis client
 from .config import settings                                      # typed settings from env
 
+from .routers import embed_api
+
 log = logging.getLogger("rag-worker")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 
@@ -85,3 +87,4 @@ app.include_router(health.router,   prefix="",    tags=["system"])
 app.include_router(metrics.router,  prefix="",    tags=["system"])
 app.include_router(ingest.router,   prefix="", tags=["ingest"])
 app.include_router(rag.router,      prefix="/v1", tags=["rag"])
+app.include_router(embed_api.router, prefix="")
