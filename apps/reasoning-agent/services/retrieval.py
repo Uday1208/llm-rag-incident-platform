@@ -1,43 +1,33 @@
+# reasoning-agent/services/retrieval.py
 """Thin retrieval service: get query embedding from rag-worker and search PG via pgvector."""
 
 import os
-from typing import List
 import httpx
-import psycopg2
-import psycopg2.extras
+from typing import List, Dict, Any
 
-PG_CONN = os.getenv("PG_CONN", "")
-RAG_EMBED_URL = os.getenv("RAG_EMBED_URL", "")
-RETR_TIMEOUT = float(os.getenv("RETR_TIMEOUT", "8"))
+RAG_WORKER_URL = (os.getenv("RAG_WORKER_URL", "") or "").rstrip("/")
+EMBED_URL = f"{RAG_WORKER_URL}/internal/embed" if RAG_WORKER_URL else None
+SEARCH_URL = f"{RAG_WORKER_URL}/internal/search" if RAG_WORKER_URL else None
 
-def _pg() -> psycopg2.extensions.connection:
-    """Open a Postgres connection using PG_CONN."""
-    if not PG_CONN:
-        raise RuntimeError("PG_CONN not set")
-    return psycopg2.connect(PG_CONN)
+class RetrievalError(Exception): ...
+class ConfigError(Exception): ...
 
-async def embed_query(text: str) -> List[float]:
-    """Fetch an embedding for a single query string from rag-worker."""
-    if not RAG_EMBED_URL:
-        raise RuntimeError("RAG_EMBED_URL not set")
-    async with httpx.AsyncClient(timeout=RETR_TIMEOUT) as http:
-        r = await http.post(RAG_EMBED_URL, json={"texts": [text]})
+async def embed_query(text: str, timeout: float = 8.0) -> List[float]:
+    if not EMBED_URL:
+        raise ConfigError("RAG_WORKER_URL not configured")
+    async with httpx.AsyncClient() as http:
+        r = await http.post(EMBED_URL, json={"text": text}, timeout=timeout)
+        r.raise_for_status()
+        vec = r.json().get("embedding", [])
+        if not isinstance(vec, list) or not vec:
+            raise RetrievalError("Invalid embedding from rag-worker")
+        return vec
+
+async def search_by_embedding(vec: List[float], top_k: int = 5, timeout: float = 8.0) -> List[Dict[str, Any]]:
+    if not SEARCH_URL:
+        raise ConfigError("RAG_WORKER_URL not configured")
+    async with httpx.AsyncClient() as http:
+        r = await http.post(SEARCH_URL, json={"embedding": vec, "top_k": top_k}, timeout=timeout)
         r.raise_for_status()
         data = r.json()
-        vecs = data.get("vectors") or []
-        if not vecs or not vecs[0]:
-            raise RuntimeError("empty embedding from rag-worker")
-        return [float(x) for x in vecs[0]]
-
-def search_by_embedding(qvec: List[float], top_k: int = 5) -> list[dict]:
-    """Return top_k documents ordered by vector distance to the query embedding."""
-    sql = """
-      SELECT id, source, ts, severity, content
-      FROM documents
-      WHERE embedding IS NOT NULL
-      ORDER BY embedding <-> %s
-      LIMIT %s
-    """
-    with _pg() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(sql, (qvec, top_k))
-        return [dict(r) for r in cur.fetchall()]
+        return data.get("results", [])
