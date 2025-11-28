@@ -19,6 +19,7 @@ from .embeddings import init_embedder, close_embedder             # load ST mode
 from .config import settings                                      # typed settings from env
 
 from .routers import embed_api
+from .routers import internal_search
 
 log = logging.getLogger("rag-worker")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -88,3 +89,4 @@ app.include_router(metrics.router,  prefix="",    tags=["system"])
 app.include_router(ingest.router,   prefix="", tags=["ingest"])
 app.include_router(rag.router,      prefix="/v1", tags=["rag"])
 app.include_router(embed_api.router, prefix="")
+app.include_router(internal_search.router, prefix="")
