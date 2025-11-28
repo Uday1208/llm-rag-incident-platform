@@ -16,7 +16,11 @@ async def embed_query(text: str, timeout: float = 8.0) -> List[float]:
     if not EMBED_URL:
         raise ConfigError("RAG_WORKER_URL not configured")
     async with httpx.AsyncClient() as http:
-        r = await http.post(EMBED_URL, json={"text": text}, timeout=timeout)
+        payload = {"texts": [text]}
+        #r = await http.post(EMBED_URL, json={"text": text}, timeout=timeout)
+        r = await http.post(EMBED_URL, json=payload, timeout=timeout)
+        if r.status_code == 422:
+            raise ValueError("worker/embed schema mismatch: expects {'texts':[str]} -> {'vectors':[[...]]}")
         r.raise_for_status()
         vec = r.json().get("embedding", [])
         if not isinstance(vec, list) or not vec:
