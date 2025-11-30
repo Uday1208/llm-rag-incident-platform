@@ -21,9 +21,9 @@ RUN pip install --no-cache-dir \
       httpx==0.24.1 \
       pydantic==1.10.13 \
       anyio>=4.4 \
-      PyYAML>=6,<7 \
+      "PyYAML>=6,<7" \
       prometheus-client==0.17.1 \
-      psycopg2-binary==2.9.9 \
+      psycopg2-binary==2.9.9
 #   transformers==4.36.2 \
 #   sentence-transformers==2.2.2
 
