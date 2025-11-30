@@ -1,286 +1,113 @@
-#!/usr/bin/env python3
-"""
-Offline RAG evaluation: Recall@k, MRR, and phrase hits for the final answer.
-Env:
-  BASE_AGENT  : https://<agent-fqdn>
-  BASE_WORKER : https://<worker-fqdn>
-CLI:
-  python -m tools.rag_eval --suite tools/rag_eval.yaml --k 5 --out eval.tsv
-"""
-import os, sys, json, time, argparse
-from typing import List, Dict, Any, Optional
-import httpx
+# tools/rag_eval.py
+# One-liner: Offline RAG eval harness that embeds queries, searches via rag-worker, and writes per-case metrics to TSV.
+
+import os, sys, json, time, argparse, csv
+from typing import List, Dict, Any
 import yaml
 
-def _bool_hit(answer: str, phrases: List[str]) -> tuple[bool, bool]:
-    """Return (exact_hit, partial_hit) for phrase list in answer (case-insensitive)."""
-    if not phrases:
-        return (False, False)
-    a = (answer or "").lower()
-    want = [p.lower() for p in phrases if p]
-    exact = all(p in a for p in want)
-    partial = any(p in a for p in want)
-    return (exact, partial)
+# Reuse your existing worker client helpers
+from services.retrieval import embed_query, search_by_embedding  # one-liner: thin HTTP wrappers around /internal/embed and /internal/search
 
-def _mrr(ranked_ids: List[str], gold: List[str]) -> float:
-    """Compute MRR for ranked_ids given gold ids (first relevant position)."""
-    if not ranked_ids or not gold:
-        return 0.0
-    gold_set = set(gold)
-    for i, rid in enumerate(ranked_ids, start=1):
-        if rid in gold_set:
-            return 1.0 / i
-    return 0.0
+def _contains_any_phrase(text: str, phrases: List[str]) -> bool:
+    """One-liner: Case-insensitive check whether any phrase occurs in text."""
+    t = (text or "").lower()
+    return any((p or "").lower() in t for p in phrases)
 
-def _recall_at_k(ranked_ids: List[str], gold: List[str], k: int) -> float:
-    """Recall@k for the retrieved list vs gold ids."""
-    if not ranked_ids or not gold:
-        return 0.0
-    top = set(ranked_ids[:k])
-    g = set(gold)
-    if not g:
-        return 0.0
-    return len(top & g) / len(g)
+def _first_hit_rank(hits: List[Dict[str, Any]], phrases: List[str]) -> int:
+    """One-liner: Return 1-based rank of first doc whose content/title contains any expected phrase, else -1."""
+    for i, h in enumerate(hits, 1):
+        blob = " ".join(
+            [
+                str(h.get("title") or ""),
+                str(h.get("content") or ""),
+                str(h.get("source") or ""),
+            ]
+        )
+        if _contains_any_phrase(blob, phrases):
+            return i
+    return -1
 
-def run_suite(suite_path: str, k: int, timeout: float, out_tsv: Optional[str]) -> None:
-    base_agent = os.environ.get("BASE_AGENT", "").rstrip("/")
-    base_worker = os.environ.get("BASE_WORKER", "").rstrip("/")
-    if not base_agent or not base_worker:
-        print("ERROR: set BASE_AGENT and BASE_WORKER", file=sys.stderr)
-        sys.exit(2)
-
+def run_eval(suite_path: str, top_k: int) -> List[Dict[str, Any]]:
+    """One-liner: Load YAML cases, run embed+search for each, compute simple retrieval metrics."""
     with open(suite_path, "r", encoding="utf-8") as f:
-        cases = yaml.safe_load(f) or {}
-    items: List[Dict[str, Any]] = cases.get("cases", [])
+        suite = yaml.safe_load(f)
 
-    rows = []
-    tot_mrr = 0.0
-    tot_rk = 0.0
-    tot_exact = 0
-    tot_partial = 0
+    cases = suite.get("cases") or []
+    rows: List[Dict[str, Any]] = []
 
-    with httpx.Client(timeout=timeout) as http:
-        for idx, c in enumerate(items, start=1):
-            q = c.get("query", "")
-            exp_ids = c.get("expected_doc_ids") or []
-            exp_phrases = c.get("expected_answer_phrases") or []
+    for idx, case in enumerate(cases, 1):
+        cid = case.get("id") or f"case_{idx}"
+        q = case["query"]
+        expect = case.get("expect_phrases", []) or []
+        t0 = time.time()
 
-            # 1) embed
-            r = http.post(f"{base_worker}/internal/embed", json={"texts":[q]})
-            r.raise_for_status()
-            vec = r.json()["vectors"][0]
-
-            # 2) search
-            r = http.post(f"{base_worker}/internal/search",
-                          json={"embedding": vec, "top_k": k})
-            r.raise_for_status()
-            hits = r.json().get("results", [])
-            ranked_ids = [h.get("id") for h in hits if h.get("id")]
-
-            # 3) reason (ask agent)
-            payload = {"query": q, "max_suggestions": 3, "format": "json"}
-            r = http.post(f"{base_agent}/v1/reason", json=payload)
-            # Fall back to text if your agent sometimes returns non-JSON
-            answer = ""
-            try:
-                r.raise_for_status()
-                j = r.json()
-                # accept either {"answer": "..."} or raw string body
-                answer = j.get("answer") if isinstance(j, dict) else r.text
-            except Exception:
-                answer = r.text
-
-            # 4) metrics
-            mrr = _mrr(ranked_ids, exp_ids)
-            rk = _recall_at_k(ranked_ids, exp_ids, k)
-            exact, partial = _bool_hit(answer, exp_phrases)
-
-            tot_mrr += mrr
-            tot_rk += rk
-            tot_exact += 1 if exact else 0
-            tot_partial += 1 if partial else 0
-
+        # embed + search
+        try:
+            emb = embed_query(q)  # returns List[float]
+            hits = search_by_embedding(emb, top_k=top_k)  # returns List[dict] with id, score, content, title, source
+        except Exception as e:
             rows.append({
-                "i": idx,
+                "id": cid,
                 "query": q,
-                "mrr": round(mrr, 4),
-                f"recall@{k}": round(rk, 4),
-                "exact": int(exact),
-                "partial": int(partial),
-                "top_ids": ",".join(ranked_ids[:k]),
+                "error": f"{type(e).__name__}: {e}",
+                "elapsed_ms": int((time.time() - t0) * 1000),
+                "top_k": top_k,
+                "k": 0,
+                "first_hit_rank": -1,
+                "any_phrase_hit": 0,
             })
+            continue
 
-    # Print summary
-    n = max(len(items), 1)
-    print(f"Cases={len(items)}  MRR={tot_mrr/n:.4f}  Recall@{k}={tot_rk/n:.4f}  "
-          f"Exact={tot_exact}/{n}  Partial={tot_partial}/{n}")
+        elapsed = int((time.time() - t0) * 1000)
 
-    if out_tsv:
-        with open(out_tsv, "w", encoding="utf-8") as f:
-            f.write("i\tmrr\trecall\texact\tpartial\ttop_ids\tquery\n")
-            for r in rows:
-                f.write(f"{r['i']}\t{r['mrr']}\t{r[f'recall@{k}']}\t{r['exact']}\t{r['partial']}\t{r['top_ids']}\t{r['query']}\n")
-#!/usr/bin/env python3
-"""
-Offline RAG evaluation: Recall@k, MRR, and phrase hits for the final answer.
-Env:
-  BASE_AGENT  : https://<agent-fqdn>
-  BASE_WORKER : https://<worker-fqdn>
-CLI:
-  python -m tools.rag_eval --suite tools/rag_eval.yaml --k 5 --out eval.tsv
-"""
-import os, sys, json, time, argparse
-from typing import List, Dict, Any, Optional
-import httpx
-import yaml
+        # metrics
+        k = len(hits)
+        first_rank = _first_hit_rank(hits, expect) if expect else -1
+        any_phrase_hit = 1 if (first_rank != -1) else 0
 
-def _bool_hit(answer: str, phrases: List[str]) -> tuple[bool, bool]:
-    """Return (exact_hit, partial_hit) for phrase list in answer (case-insensitive)."""
-    if not phrases:
-        return (False, False)
-    a = (answer or "").lower()
-    want = [p.lower() for p in phrases if p]
-    exact = all(p in a for p in want)
-    partial = any(p in a for p in want)
-    return (exact, partial)
+        rows.append({
+            "id": cid,
+            "query": q,
+            "elapsed_ms": elapsed,
+            "top_k": top_k,
+            "k": k,
+            "first_hit_rank": first_rank,     # 1..k or -1 if none
+            "any_phrase_hit": any_phrase_hit, # 1 if some expected phrase is present in retrieved docs
+            # keep quick debug columns short
+            "debug_top1_title": (hits[0].get("title") if hits else None),
+            "debug_top1_score": (hits[0].get("score") if hits else None),
+        })
 
-def _mrr(ranked_ids: List[str], gold: List[str]) -> float:
-    """Compute MRR for ranked_ids given gold ids (first relevant position)."""
-    if not ranked_ids or not gold:
-        return 0.0
-    gold_set = set(gold)
-    for i, rid in enumerate(ranked_ids, start=1):
-        if rid in gold_set:
-            return 1.0 / i
-    return 0.0
+    return rows
 
-def _recall_at_k(ranked_ids: List[str], gold: List[str], k: int) -> float:
-    """Recall@k for the retrieved list vs gold ids."""
-    if not ranked_ids or not gold:
-        return 0.0
-    top = set(ranked_ids[:k])
-    g = set(gold)
-    if not g:
-        return 0.0
-    return len(top & g) / len(g)
+def write_tsv(rows: List[Dict[str, Any]], out_path: str) -> None:
+    """One-liner: Write eval rows to a TSV with stable columns."""
+    fieldnames = [
+        "id", "query", "elapsed_ms", "top_k", "k",
+        "first_hit_rank", "any_phrase_hit", "debug_top1_title", "debug_top1_score", "error"
+    ]
+    with open(out_path, "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t", extrasaction="ignore")
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
 
-def run_suite(suite_path: str, k: int, timeout: float, out_tsv: Optional[str]) -> None:
-    base_agent = os.environ.get("BASE_AGENT", "").rstrip("/")
-    base_worker = os.environ.get("BASE_WORKER", "").rstrip("/")
-    if not base_agent or not base_worker:
-        print("ERROR: set BASE_AGENT and BASE_WORKER", file=sys.stderr)
-        sys.exit(2)
-
-    with open(suite_path, "r", encoding="utf-8") as f:
-        cases = yaml.safe_load(f) or {}
-    items: List[Dict[str, Any]] = cases.get("cases", [])
-
-    rows = []
-    tot_mrr = 0.0
-    tot_rk = 0.0
-    tot_exact = 0
-    tot_partial = 0
-
-    with httpx.Client(timeout=timeout) as http:
-        for idx, c in enumerate(items, start=1):
-            q = c.get("query", "")
-            exp_ids = c.get("expected_doc_ids") or []
-            exp_phrases = c.get("expected_answer_phrases") or []
-
-            # 1) embed
-            r = http.post(f"{base_worker}/internal/embed", json={"texts":[q]})
-            r.raise_for_status()
-            vec = r.json()["vectors"][0]
-
-            # 2) search
-            r = http.post(f"{base_worker}/internal/search",
-                          json={"embedding": vec, "top_k": k})
-            r.raise_for_status()
-            hits = r.json().get("results", [])
-            ranked_ids = [h.get("id") for h in hits if h.get("id")]
-
-            # 3) reason (ask agent)
-            payload = {"query": q, "max_suggestions": 3, "format": "json"}
-            r = http.post(f"{base_agent}/v1/reason", json=payload)
-            # Fall back to text if your agent sometimes returns non-JSON
-            answer = ""
-            try:
-                r.raise_for_status()
-                j = r.json()
-                # accept either {"answer": "..."} or raw string body
-                answer = j.get("answer") if isinstance(j, dict) else r.text
-            except Exception:
-                answer = r.text
-
-            # 4) metrics
-            mrr = _mrr(ranked_ids, exp_ids)
-            rk = _recall_at_k(ranked_ids, exp_ids, k)
-            exact, partial = _bool_hit(answer, exp_phrases)
-
-            tot_mrr += mrr
-            tot_rk += rk
-            tot_exact += 1 if exact else 0
-            tot_partial += 1 if partial else 0
-
-            rows.append({
-                "i": idx,
-                "query": q,
-                "mrr": round(mrr, 4),
-                f"recall@{k}": round(rk, 4),
-                "exact": int(exact),
-                "partial": int(partial),
-                "top_ids": ",".join(ranked_ids[:k]),
-            })
-
-    # Print summary
-    n = max(len(items), 1)
-    print(f"Cases={len(items)}  MRR={tot_mrr/n:.4f}  Recall@{k}={tot_rk/n:.4f}  "
-          f"Exact={tot_exact}/{n}  Partial={tot_partial}/{n}")
-
-    if out_tsv:
-        with open(out_tsv, "w", encoding="utf-8") as f:
-            f.write("i\tmrr\trecall\texact\tpartial\ttop_ids\tquery\n")
-            for r in rows:
-                f.write(f"{r['i']}\t{r['mrr']}\t{r[f'recall@{k}']}\t{r['exact']}\t{r['partial']}\t{r['top_ids']}\t{r['query']}\n")
-
-# --- CLI ENTRYPOINT (add at bottom of tools/rag_eval.py) ---------------------
-def main():
-    """
-    Parse CLI args, run the RAG eval using the existing functions in this module,
-    and write a TSV to --out. Exits 0 on success.
-    """
-    import argparse, os, sys, logging
-    logging.basicConfig(
-        level=getattr(logging, os.getenv("LOG_LEVEL", "WARNING").upper(), logging.WARNING),
-        format="%(levelname)s %(message)s",
-    )
-
-    ap = argparse.ArgumentParser(prog="tools.rag_eval")
-    ap.add_argument("--suite", required=True, help="Path to YAML eval suite")
+def main() -> int:
+    """One-liner: CLI entrypoint — parse args, run eval, write TSV, and print a short summary."""
+    ap = argparse.ArgumentParser(description="RAG retrieval eval harness")
+    ap.add_argument("--suite", required=True, help="Path to YAML with .cases[].query and .cases[].expect_phrases")
     ap.add_argument("--k", type=int, default=5, help="Top-k docs to retrieve")
-    ap.add_argument("--out", required=True, help="Path to write TSV results")
+    ap.add_argument("--out", required=True, help="Output TSV path")
     args = ap.parse_args()
 
-    # TODO: replace the next line with your file’s existing “do the eval” function.
-    # For example, if you already have: results = run_eval(args.suite, args.k)
-    # Then call write_tsv(results, args.out)
-    try:
-        # Example contract:
-        # - run_eval returns a list[dict] with consistent keys
-        # - write_tsv writes them to args.out
-        results = run_eval(args.suite, args.k)           # <--- call your existing runner here
-        write_tsv(results, args.out)                     # <--- and your existing writer here
-        logging.info("wrote %s row(s) to %s", len(results), args.out)
-    except NameError:
-        # Fallback in case your module used different names; keep messages helpful.
-        logging.error(
-            "No run_eval()/write_tsv() found. Wire your existing eval functions here."
-        )
-        sys.exit(2)
+    rows = run_eval(args.suite, args.k)
+    write_tsv(rows, args.out)
+
+    total = len(rows)
+    ok = sum(1 for r in rows if r.get("any_phrase_hit") == 1)
+    print(json.dumps({"cases": total, "any_phrase_hit@k": ok, "hit_rate": (ok / total if total else 0.0)}, indent=2))
+    print(f"[ok] wrote {args.out}")
     return 0
 
 if __name__ == "__main__":
-    import sys
     sys.exit(main())
-# ---------------------------------------------------------------------------
-
