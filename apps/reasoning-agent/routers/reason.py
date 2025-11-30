@@ -52,7 +52,7 @@ async def reason(req: ReasonRequest) -> ReasonOut:
             question=req.query,
             #contexts=req.contexts or [],
             contexts=contexts,
-            out_format=req.format or "text",
+            format=req.format or "text",
             temperature=req.temperature or 0.2,
             max_tokens=req.max_tokens or 512,
         )
