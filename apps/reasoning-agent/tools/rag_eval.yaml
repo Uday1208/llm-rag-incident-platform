@@ -1,0 +1,11 @@
+cases:
+  - query: "httpcore.ReadTimeout around /v1/reason"
+    expected_doc_ids: ["7deea28ae390727820b22d5ceab363618483ce0b"]
+    expected_answer_phrases:
+      - "ReadTimeout"
+      - "/v1/reason"
+  - query: "Why did /v1/ingest return 500?"
+    expected_doc_ids: ["593171b23a3c71ce53d26649c504289dbb3daf62","f463459a9d3e29a3cc3f94f449f740cfcff7e1b7"]
+    expected_answer_phrases:
+      - "ingest"
+      - "500"

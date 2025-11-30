@@ -9,6 +9,12 @@ import logging
 from services.llm_client import chat_reasoning, LLMTimeout, LLMUnavailable
 from services.retrieval import top_contexts_for_query  # NEW import
 
+from metrics import (
+    rag_retrieval_queries_total,
+    rag_retrieved_docs_total,
+    rag_resolution_hits_total,
+)
+
 log = logging.getLogger("reason")
 
 router = APIRouter()
@@ -45,6 +51,17 @@ async def reason(req: ReasonRequest) -> ReasonOut:
         except Exception as e:
             log.warning(f"RAG lookup failed: {e}; proceeding with zero-shot.")
             contexts = []
+    # Telemetry counters (no labels to avoid label mismatch errors)
+    rag_retrieval_queries_total.inc()
+    rag_retrieved_docs_total.inc(len(contexts) if contexts else 0)
+    
+    # Simple “resolution hit” heuristic:
+    # mark a hit if any chosen context is clearly from resolutions table/source.
+    if any(
+        (c.get("source") == "resolutions") or ("Resolution" in (c.get("title") or "")) 
+        for c in (contexts or [])
+    ):
+        rag_resolution_hits_total.inc()
 
     # 2) Call LLM exactly as before (we’re not changing your prompt flow here)
     try:
