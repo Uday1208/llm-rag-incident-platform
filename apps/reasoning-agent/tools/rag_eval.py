@@ -242,3 +242,45 @@ def run_suite(suite_path: str, k: int, timeout: float, out_tsv: Optional[str]) -
             f.write("i\tmrr\trecall\texact\tpartial\ttop_ids\tquery\n")
             for r in rows:
                 f.write(f"{r['i']}\t{r['mrr']}\t{r[f'recall@{k}']}\t{r['exact']}\t{r['partial']}\t{r['top_ids']}\t{r['query']}\n")
+
+# --- CLI ENTRYPOINT (add at bottom of tools/rag_eval.py) ---------------------
+def main():
+    """
+    Parse CLI args, run the RAG eval using the existing functions in this module,
+    and write a TSV to --out. Exits 0 on success.
+    """
+    import argparse, os, sys, logging
+    logging.basicConfig(
+        level=getattr(logging, os.getenv("LOG_LEVEL", "WARNING").upper(), logging.WARNING),
+        format="%(levelname)s %(message)s",
+    )
+
+    ap = argparse.ArgumentParser(prog="tools.rag_eval")
+    ap.add_argument("--suite", required=True, help="Path to YAML eval suite")
+    ap.add_argument("--k", type=int, default=5, help="Top-k docs to retrieve")
+    ap.add_argument("--out", required=True, help="Path to write TSV results")
+    args = ap.parse_args()
+
+    # TODO: replace the next line with your file’s existing “do the eval” function.
+    # For example, if you already have: results = run_eval(args.suite, args.k)
+    # Then call write_tsv(results, args.out)
+    try:
+        # Example contract:
+        # - run_eval returns a list[dict] with consistent keys
+        # - write_tsv writes them to args.out
+        results = run_eval(args.suite, args.k)           # <--- call your existing runner here
+        write_tsv(results, args.out)                     # <--- and your existing writer here
+        logging.info("wrote %s row(s) to %s", len(results), args.out)
+    except NameError:
+        # Fallback in case your module used different names; keep messages helpful.
+        logging.error(
+            "No run_eval()/write_tsv() found. Wire your existing eval functions here."
+        )
+        sys.exit(2)
+    return 0
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())
+# ---------------------------------------------------------------------------
+
