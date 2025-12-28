@@ -3,14 +3,14 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install dependencies
-COPY requirements.txt .
+COPY apps/preprocessor/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY . .
+COPY apps/preprocessor .
 
 # Copy shared modules from ingestor
-COPY ../ingestor/modules ./ingestor/modules
+COPY apps/ingestor/modules ./ingestor/modules
 
 # Environment defaults
 ENV PYTHONUNBUFFERED=1
