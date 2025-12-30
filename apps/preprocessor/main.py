@@ -17,8 +17,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 
-from .config import PreprocessorConfig, TriggerMode
-from .pipeline import ProcessingPipeline
+from config import PreprocessorConfig, TriggerMode
+from pipeline import ProcessingPipeline
 
 # =============================================================================
 # Logging
