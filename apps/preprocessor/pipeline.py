@@ -29,9 +29,9 @@ except ImportError:
     from ingestor.modules.trace_context import normalize_app_insights, normalize_batch
     from ingestor.modules.trace_bundler import BatchTraceBundler, BundlerConfig
 
-from .config import PreprocessorConfig
-from .blob_reader import BlobReader
-from .summarizer import IncidentSummarizer, summarize_bundles
+from config import PreprocessorConfig
+from blob_reader import BlobReader
+from summarizer import IncidentSummarizer, summarize_bundles
 
 log = logging.getLogger("preprocessor.pipeline")
 
