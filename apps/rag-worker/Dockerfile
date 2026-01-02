@@ -24,8 +24,8 @@ COPY worker ./worker
 RUN useradd -m -u 10002 appuser
 USER appuser
 
-EXPOSE 8080
+EXPOSE 8081
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD curl -f http://127.0.0.1:8080/health || exit 1
+  CMD curl -f http://127.0.0.1:8081/health || exit 1
 
-CMD ["uvicorn", "worker.main:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["uvicorn", "worker.main:app", "--host", "0.0.0.0", "--port", "8081"]
