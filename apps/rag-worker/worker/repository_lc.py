@@ -4,7 +4,10 @@ Purpose: LangChain-backed repository using PGVector for vector storage and searc
 """
 
 from typing import List, Tuple, Optional
-from langchain.vectorstores.pgvector import PGVector
+try:
+    from langchain_community.vectorstores import PGVector
+except ImportError:
+    from langchain.vectorstores.pgvector import PGVector
 from langchain.embeddings.base import Embeddings
 from sentence_transformers import SentenceTransformer
 from .config import settings
