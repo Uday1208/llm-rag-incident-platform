@@ -240,6 +240,7 @@ class GlobalConfig:
     database: DatabaseConfig
     redis: RedisConfig
     USE_LANGCHAIN_STORE: bool
+    LOG_LEVEL: str
 
     @classmethod
     def load(cls) -> "GlobalConfig":
@@ -249,6 +250,7 @@ class GlobalConfig:
             database=DatabaseConfig.from_env(),
             redis=RedisConfig.from_env(),
             USE_LANGCHAIN_STORE=os.getenv("USE_LANGCHAIN_STORE", "false").lower() == "true",
+            LOG_LEVEL=os.getenv("LOG_LEVEL", "INFO").upper(),
         )
 
     @property
