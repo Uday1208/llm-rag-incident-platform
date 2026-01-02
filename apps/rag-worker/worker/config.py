@@ -251,5 +251,10 @@ class GlobalConfig:
             USE_LANGCHAIN_STORE=os.getenv("USE_LANGCHAIN_STORE", "false").lower() == "true",
         )
 
+    @property
+    def VECTOR_SQLTYPE(self) -> str:
+        """Get pgvector SQL type definition (e.g., 'vector(384)')."""
+        return f"vector({self.embedding.dimension})"
+
 # Export global settings instance
 settings = GlobalConfig.load()
