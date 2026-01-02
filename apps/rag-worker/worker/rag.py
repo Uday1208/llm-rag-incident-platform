@@ -5,7 +5,10 @@ Purpose: RAG orchestration utilities (retrieval + simple answer composition).
 
 from typing import List
 from transformers import pipeline
-from langchain.prompts import PromptTemplate
+try:
+    from langchain_core.prompts import PromptTemplate
+except ImportError:
+    from langchain.prompts import PromptTemplate
 from .config import settings
 
 _gen = None
