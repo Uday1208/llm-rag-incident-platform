@@ -232,11 +232,24 @@ class RedisConfig:
 # Global Config Instance
 # =============================================================================
 
-def get_config():
-    """Get all configuration as a dict."""
-    return {
-        "embedding": EmbeddingConfig.from_env(),
-        "llm": LLMConfig.from_env(),
-        "database": DatabaseConfig.from_env(),
-        "redis": RedisConfig.from_env(),
-    }
+@dataclass
+class GlobalConfig:
+    """Aggregated configuration."""
+    embedding: EmbeddingConfig
+    llm: LLMConfig
+    database: DatabaseConfig
+    redis: RedisConfig
+    USE_LANGCHAIN_STORE: bool
+
+    @classmethod
+    def load(cls) -> "GlobalConfig":
+        return cls(
+            embedding=EmbeddingConfig.from_env(),
+            llm=LLMConfig.from_env(),
+            database=DatabaseConfig.from_env(),
+            redis=RedisConfig.from_env(),
+            USE_LANGCHAIN_STORE=os.getenv("USE_LANGCHAIN_STORE", "false").lower() == "true",
+        )
+
+# Export global settings instance
+settings = GlobalConfig.load()
