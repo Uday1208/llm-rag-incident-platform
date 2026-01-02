@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 
 from .tools import AGENT_TOOLS
 from .executor import ToolExecutor
-from ..services.llm_client import LLMClient, chat_with_tools, RESOLUTION_AGENT_PROMPT
+from services.llm_client import LLMClient, chat_with_tools, RESOLUTION_AGENT_PROMPT
 
 log = logging.getLogger("reasoning-agent.resolver")
 

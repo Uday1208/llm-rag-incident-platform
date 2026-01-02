@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 
-from ..agent import resolve_incident, get_agent, compare_agents, AgentType
+from agent import resolve_incident, get_agent, compare_agents, AgentType
 
 
 router = APIRouter(prefix="/v1/agent", tags=["agent"])
@@ -118,7 +118,7 @@ async def execute_tool(request: ToolCallRequest) -> Dict[str, Any]:
     # Access executor from the agent (works for both types)
     executor = getattr(agent, 'executor', None)
     if not executor:
-        from ..agent import ToolExecutor
+        from agent import ToolExecutor
         executor = ToolExecutor()
     result = await executor.execute(request.tool_name, request.arguments)
     return {"tool": request.tool_name, "result": result}
@@ -127,14 +127,14 @@ async def execute_tool(request: ToolCallRequest) -> Dict[str, Any]:
 @router.get("/tools")
 async def list_tools() -> Dict[str, Any]:
     """List available agent tools and their schemas."""
-    from ..agent import AGENT_TOOLS
+    from agent import AGENT_TOOLS
     return {"tools": AGENT_TOOLS}
 
 
 @router.get("/types")
 async def list_agent_types() -> Dict[str, Any]:
     """List available agent implementations."""
-    from ..agent import is_langchain_available
+    from agent import is_langchain_available
     return {
         "available_types": [
             {"type": "custom", "description": "Custom ReAct implementation", "available": True},
