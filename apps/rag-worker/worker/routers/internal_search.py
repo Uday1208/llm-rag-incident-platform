@@ -1,6 +1,6 @@
 # worker/routers/internal_search.py
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, conlist
+from pydantic import BaseModel, Field
 import os
 import psycopg2
 from typing import List, Dict, Any
@@ -12,7 +12,7 @@ router = APIRouter(tags=["internal"])
 EMBED_DIM = int(os.getenv("EMBED_DIM", "384"))
 
 class SearchIn(BaseModel):
-    embedding: conlist(float, min_items=1)
+    embedding: List[float] = Field(min_length=1)
     top_k: int = 5
 
 @router.post("/internal/search")
