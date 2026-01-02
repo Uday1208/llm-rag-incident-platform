@@ -15,8 +15,8 @@ COPY apps/ingestor/modules ./ingestor/modules
 # Environment defaults
 ENV PYTHONUNBUFFERED=1
 ENV LOG_LEVEL=INFO
-ENV PORT=8000
+ENV PORT=8080
 
 # Run the application
-EXPOSE 8000
+EXPOSE 8080
 CMD ["python", "-m", "main"]
