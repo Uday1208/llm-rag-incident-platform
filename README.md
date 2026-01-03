@@ -29,10 +29,10 @@ An AI-powered incident resolution platform that combines **Retrieval-Augmented G
 
 | Service | Port | Description |
 |---------|------|-------------|
-| `ingestor` | 8001 | Event Hub consumer, log normalization |
-| `preprocessor` | 8002 | Batch processing, TraceID bundling, LLM summarization |
-| `rag-worker` | 8000 | Embeddings, vector search, database owner |
-| `reasoning-agent` | 8003 | ReAct agent for incident resolution |
+| `ingestor` | 8080 | Event Hub consumer, log normalization |
+| `preprocessor` | 8080 | Batch processing, TraceID bundling, LLM summarization |
+| `rag-worker` | 8081 | Embeddings, vector search, database owner |
+| `reasoning-agent` | 8080 | ReAct agent for incident resolution |
 
 ## 🚀 Quick Start
 
@@ -54,13 +54,13 @@ cd llm-rag-incident-platform
 cd apps/rag-worker
 pip install -r requirements.txt
 export PG_HOST=localhost PG_USER=postgres PG_PASS=secret PG_DB=ragincdb
-uvicorn worker.main:app --port 8000
+uvicorn worker.main:app --port 8081
 
 # Start reasoning-agent
 cd apps/reasoning-agent
 pip install -r requirements.txt
-export RAG_WORKER_URL=http://localhost:8000
-uvicorn main:app --port 8003
+export RAG_WORKER_URL=http://localhost:8081
+uvicorn main:app --port 8080
 ```
 
 ### Environment Variables
@@ -91,6 +91,9 @@ AOAI_EMBED_DEPLOYMENT=text-embedding-ada-002
 # Agent type
 AGENT_TYPE=custom             # custom | langchain
 ```
+
+### Local LLM Configuration
+For detailed instructions on configuring the Preprocessor to use a local LLM (like Ollama), see [PREPROCESSOR_SETUP.md](./PREPROCESSOR_SETUP.md).
 
 ## 🤖 Agentic Resolution API
 
