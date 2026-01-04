@@ -8,6 +8,7 @@ on:
       - "main-preprocessor"
     paths:
       - "apps/preprocessor/**"
+      - "apps/ingestor/modules/**"
       - ".github/workflows/build-push-preprocessor.yml"
 
 jobs:

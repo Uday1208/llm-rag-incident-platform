@@ -22,6 +22,7 @@ TRACE_ID_KEYS = (
     "traceId",           # W3C Trace Context
     "TraceId",           # .NET style
     "x-ms-request-id",   # Azure internal
+    "otelTraceId",       # OpenTelemetry custom injection
 )
 
 # SpanID / RequestID fields
@@ -32,6 +33,7 @@ SPAN_ID_KEYS = (
     "id",                  # App Insights item ID
     "requestId",           # Azure
     "RequestId",           # .NET style
+    "otelSpanId",          # OpenTelemetry custom injection
 )
 
 # Service identification
