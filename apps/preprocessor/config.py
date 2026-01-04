@@ -66,7 +66,7 @@ class PreprocessorConfig:
             processed_prefix=os.getenv("PROCESSED_PREFIX", "processed/"),
             
             batch_size=int(os.getenv("PREPROCESS_BATCH_SIZE", "1000")),
-            min_severity=os.getenv("PREPROCESS_MIN_SEVERITY", "WARNING"),
+            min_severity=os.getenv("PREPROCESS_MIN_SEVERITY", "INFO"),
             trace_window_seconds=int(os.getenv("TRACE_WINDOW_SECONDS", "60")),
             max_logs_per_bundle=int(os.getenv("MAX_LOGS_PER_BUNDLE", "100")),
             

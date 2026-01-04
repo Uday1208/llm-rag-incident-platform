@@ -60,6 +60,10 @@ AI_SEVERITY_MAP = {
     4: "CRITICAL",
 }
 
+import json
+
+# ...
+
 # Severity string normalization
 SEVERITY_NORMALIZE = {
     "verbose": "DEBUG",
@@ -73,6 +77,42 @@ SEVERITY_NORMALIZE = {
     "critical": "CRITICAL",
     "fatal": "CRITICAL",
 }
+
+
+def _expand_nested_json(payload: Dict[str, Any]) -> None:
+    """
+    Parses nested JSON string from 'Log' or 'Message' field and merges it into payload.
+    This is necessary when container logs (JSON) are wrapped as a string by the platform.
+    """
+    dims = payload.get("customDimensions") or payload.get("properties") or {}
+    
+    # Candidates for nested JSON string
+    keys_to_check = ["Log", "Message", "msg", "log", "message"]
+    
+    # Also check inside dimensions
+    candidates = []
+    for k in keys_to_check:
+        if k in payload:
+            candidates.append(payload[k])
+        if k in dims:
+            candidates.append(dims[k])
+            
+    for val in candidates:
+        if isinstance(val, str) and val.strip().startswith("{"):
+            try:
+                parsed = json.loads(val)
+                if isinstance(parsed, dict):
+                    # Merge parsed fields into payload (top-level) so extractors can find them
+                    # We prioritize existing payload keys, but for trace IDs we want the inner ones
+                    for k, v in parsed.items():
+                        if k not in payload:
+                            payload[k] = v
+                        # Special case for logging fields we definitely want from the app
+                        if k in ["otelTraceId", "otelSpanId", "service", "name", "level", "levelname"]:
+                            payload[k] = v
+            except (json.JSONDecodeError, TypeError):
+                continue
+
 
 
 # =============================================================================
@@ -267,6 +307,11 @@ def normalize_app_insights(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     # Skip metrics (we only want traces/exceptions)
     if payload.get("itemType") == "metric" or "metricName" in payload:
         return None
+    
+    # NEW: Attempt to parse nested JSON from the 'Log'/'Message' field
+    # Azure Container Apps often wraps the app's stdout JSON in a "Log" string field.
+    # We need to unwrap it to find 'otelTraceId' and other fields.
+    _expand_nested_json(payload)
     
     # Extract core fields
     trace_id, span_id = extract_trace_context(payload)
