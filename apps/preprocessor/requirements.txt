@@ -19,3 +19,9 @@ apscheduler==3.10.4
 
 # Logging
 python-json-logger==2.0.7
+
+# OpenTelemetry
+opentelemetry-sdk>=1.21.0
+opentelemetry-instrumentation-fastapi>=0.42b0
+opentelemetry-instrumentation-httpx>=0.42b0
+

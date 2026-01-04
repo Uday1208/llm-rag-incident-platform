@@ -8,6 +8,7 @@ import httpx
 from fastapi import FastAPI
 from redis.asyncio import Redis
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from .config import settings
 
 class DownstreamError(Exception):
@@ -19,6 +20,9 @@ async def init_clients(app: FastAPI) -> None:
                           max_connections=settings.HTTP_MAX_CONNECTIONS)
     timeout = httpx.Timeout(settings.HTTP_TIMEOUT_SECS)
     app.state.http = httpx.AsyncClient(limits=limits, timeout=timeout)
+    
+    # Instrument HTTPX to propagate trace context to downstream services
+    HTTPXClientInstrumentor.instrument_client(app.state.http)
 
     # Redis TLS if configured
     ssl_ctx = None

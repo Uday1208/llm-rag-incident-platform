@@ -10,6 +10,12 @@ import logging
 from contextlib import asynccontextmanager, suppress
 from fastapi import FastAPI
 
+# OpenTelemetry instrumentation
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
 # ---- keep your existing local imports exactly as-is ----
 from .logging_setup import configure_logging                      # sets JSON logging/levels/handlers
 from .instrumentation import setup_metrics, REQUESTS, LATENCY     # registers Prometheus metrics in app.state
@@ -24,6 +30,10 @@ from .routers import export
 
 log = logging.getLogger("rag-worker")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+
+# Initialize OpenTelemetry tracer
+trace.set_tracer_provider(TracerProvider())
+trace.get_tracer_provider().add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
 
 # ---------- helpers to run init tasks without blocking startup ----------
 async def _guarded(name: str, coro, app: FastAPI, timeout_sec: float = None):
@@ -74,6 +84,9 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# Instrument FastAPI for distributed tracing
+FastAPIInstrumentor.instrument_app(app)
 
 @app.middleware("http")
 async def prometheus_mw(request, call_next):

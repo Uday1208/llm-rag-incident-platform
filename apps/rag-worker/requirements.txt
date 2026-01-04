@@ -24,6 +24,9 @@ sqlalchemy>=2.0.23
 # Observability & logging
 prometheus-client>=0.17.1
 python-json-logger>=2.0.7
+opentelemetry-sdk>=1.21.0
+opentelemetry-instrumentation-fastapi>=0.42b0
+opentelemetry-instrumentation-httpx>=0.42b0
 
 # Database migrations
 alembic>=1.13.1

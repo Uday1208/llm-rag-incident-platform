@@ -16,18 +16,48 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
+from pythonjsonlogger import jsonlogger
+
+# OpenTelemetry
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from config import PreprocessorConfig, TriggerMode
 from pipeline import ProcessingPipeline
 
 # =============================================================================
-# Logging
+# OpenTelemetry Setup
 # =============================================================================
 
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format='{"time":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","msg":"%(message)s"}',
-)
+trace.set_tracer_provider(TracerProvider())
+trace.get_tracer_provider().add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
+
+# =============================================================================
+# Logging with Trace ID
+# =============================================================================
+
+class TraceIdFilter(logging.Filter):
+    """Inject OpenTelemetry trace_id into log records."""
+    def filter(self, record):
+        span = trace.get_current_span()
+        ctx = span.get_span_context()
+        record.otelTraceId = format(ctx.trace_id, '032x') if ctx.is_valid else "0"
+        record.otelSpanId = format(ctx.span_id, '016x') if ctx.is_valid else "0"
+        return True
+
+def configure_logging():
+    logger = logging.getLogger()
+    logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
+    handler = logging.StreamHandler()
+    formatter = jsonlogger.JsonFormatter(
+        "%(asctime)s %(levelname)s %(name)s %(message)s %(otelTraceId)s %(otelSpanId)s"
+    )
+    handler.setFormatter(formatter)
+    handler.addFilter(TraceIdFilter())
+    logger.handlers = [handler]
+
 log = logging.getLogger("preprocessor")
 
 
@@ -106,6 +136,8 @@ def setup_scheduler(pipeline: ProcessingPipeline, cron: str):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager."""
+    configure_logging()  # Initialize structured logging with trace IDs
+    
     config = PreprocessorConfig.from_env()
     pipeline = ProcessingPipeline(config)
     
@@ -134,6 +166,9 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# Instrument FastAPI for distributed tracing
+FastAPIInstrumentor.instrument_app(app)
 
 
 # =============================================================================

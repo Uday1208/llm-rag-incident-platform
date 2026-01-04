@@ -1,12 +1,12 @@
 """
 File: logging_setup.py
-Purpose: Configure structured JSON logging for production observability.
+Purpose: Configure structured JSON logging with OpenTelemetry trace context.
 """
 
 import logging
 from pythonjsonlogger import jsonlogger
 from opentelemetry import trace
-from .config import settings
+
 
 class TraceIdFilter(logging.Filter):
     """Inject OpenTelemetry trace_id into log records."""
@@ -17,10 +17,11 @@ class TraceIdFilter(logging.Filter):
         record.otelSpanId = format(ctx.span_id, '016x') if ctx.is_valid else "0"
         return True
 
-def configure_logging() -> None:
-    """Configure root logger for JSON output and level from settings."""
+
+def configure_logging(level: str = "INFO") -> None:
+    """Configure root logger for JSON output with trace context."""
     logger = logging.getLogger()
-    logger.setLevel(settings.LOG_LEVEL)
+    logger.setLevel(level)
     handler = logging.StreamHandler()
     formatter = jsonlogger.JsonFormatter(
         "%(asctime)s %(levelname)s %(name)s %(message)s %(otelTraceId)s %(otelSpanId)s"
@@ -28,4 +29,3 @@ def configure_logging() -> None:
     handler.setFormatter(formatter)
     handler.addFilter(TraceIdFilter())
     logger.handlers = [handler]
-
