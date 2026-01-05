@@ -32,7 +32,7 @@ from pipeline import ProcessingPipeline
 # =============================================================================
 
 trace.set_tracer_provider(TracerProvider())
-trace.get_tracer_provider().add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
+# trace.get_tracer_provider().add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
 
 # =============================================================================
 # Logging with Trace ID
