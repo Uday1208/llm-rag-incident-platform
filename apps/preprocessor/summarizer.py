@@ -107,8 +107,13 @@ class IncidentSummarizer:
             return self._parse_summary(response)
             
         except Exception as e:
+            # Soft fail: If LLM summary fails, just return bundle as-is or with empty summary
             log.warning(f"LLM summarization failed: {e}")
-            return self._fallback_summary(bundle)
+            return {
+                "symptoms": None,
+                "failing_dependency": None,
+                "error_signature": None
+            }
     
     async def _call_ollama(self, user_message: str) -> str:
         """Call Ollama API."""
