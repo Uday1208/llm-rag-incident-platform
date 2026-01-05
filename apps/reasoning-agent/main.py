@@ -34,7 +34,7 @@ from logging_setup import configure_logging
 
 # Initialize OpenTelemetry tracer
 trace.set_tracer_provider(TracerProvider())
-trace.get_tracer_provider().add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
+# trace.get_tracer_provider().add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
