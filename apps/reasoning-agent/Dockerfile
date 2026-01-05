@@ -15,17 +15,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # App requirements (keep lean)
 # If you need local fallback (transformers), uncomment the last two lines
-RUN pip install --no-cache-dir \
-      fastapi==0.103.2 \
-      uvicorn[standard]==0.23.2 \
-      httpx==0.24.1 \
-      pydantic==1.10.13 \
-      anyio>=4.4 \
-      "PyYAML>=6,<7" \
-      prometheus-client==0.17.1 \
-      psycopg2-binary==2.9.9
-#   transformers==4.36.2 \
-#   sentence-transformers==2.2.2
+# Install dependencies from requirements.txt
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy only the app
 COPY . /app
