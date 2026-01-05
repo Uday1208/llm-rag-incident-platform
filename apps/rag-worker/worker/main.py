@@ -33,7 +33,7 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 
 # Initialize OpenTelemetry tracer
 trace.set_tracer_provider(TracerProvider())
-trace.get_tracer_provider().add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
+# trace.get_tracer_provider().add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
 
 # ---------- helpers to run init tasks without blocking startup ----------
 async def _guarded(name: str, coro, app: FastAPI, timeout_sec: float = None):
