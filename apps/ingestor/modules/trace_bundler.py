@@ -313,18 +313,43 @@ class BatchTraceBundler:
         }
     
     def _format_content(self, logs_df: pd.DataFrame) -> str:
-        """Format DataFrame logs into content string."""
+        """Format DataFrame logs into content string with deduplication."""
+        if logs_df.empty:
+            return ""
+            
+        # Prioritize Errors: if we have any ERROR logs, only keep WARNING+ or unique INFO messages
+        has_errors = (logs_df["sev_num"] >= SEVERITY_ORDER["ERROR"]).any()
+        
         lines = []
         char_count = 0
+        seen_messages = set()
         
-        for _, row in logs_df.iterrows():
+        # Sort logs by timestamp
+        sorted_logs = logs_df.sort_values("timestamp")
+        
+        for _, row in sorted_logs.iterrows():
             sev = row.get("severity", "INFO")
-            msg = row.get("message", "")
+            msg = row.get("message", "").strip()
+            
+            # Simple deduplication: skip if message seen recently in this trace
+            if msg in seen_messages:
+                continue
+            
+            # If we have real errors, skip generic INFO chatter like "Response status: 200"
+            if has_errors and SEVERITY_ORDER.get(sev, 1) < SEVERITY_ORDER["WARNING"]:
+                if any(p in msg for p in ["Response status: 20", "Request URL", "Job", "Scheduler"]):
+                    continue
+            
+            seen_messages.add(msg)
             
             line = f"[{sev}] {msg}"
             
+            # Add stack trace if explicitly present
+            if "stack_trace" in row and pd.notna(row["stack_trace"]):
+                line += f"\n  Stack Trace: {str(row['stack_trace'])[:500]}..."
+            
             if char_count + len(line) > self.config.max_content_length:
-                lines.append(f"... ({len(logs_df) - len(lines)} more logs)")
+                lines.append(f"... ({len(logs_df) - len(lines)} more logs truncated)")
                 break
             
             lines.append(line)

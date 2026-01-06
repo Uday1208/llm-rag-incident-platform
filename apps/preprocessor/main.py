@@ -138,6 +138,11 @@ async def lifespan(app: FastAPI):
     """Application lifespan manager."""
     configure_logging()  # Initialize structured logging with trace IDs
     
+    # Silence infrastructure noise
+    logging.getLogger("azure").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    
     config = PreprocessorConfig.from_env()
     pipeline = ProcessingPipeline(config)
     

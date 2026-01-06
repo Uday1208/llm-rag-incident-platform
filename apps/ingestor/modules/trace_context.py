@@ -321,8 +321,20 @@ def normalize_app_insights(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     message = extract_message(payload)
     timestamp = extract_timestamp(payload)
     
-    # Skip empty messages
+    # Skip empty messages or noise patterns
     if not message or not message.strip():
+        return None
+        
+    # Surgical Noise Filter: skip common operational "chatter"
+    noise_patterns = [
+        r"^Request URL:", 
+        r"^Request method:", 
+        r"^Request headers:", 
+        r"^Response headers:",
+        r"^Response status: 20[0-9]",  # Skip successful response status lines
+        r"Managed Identity token",     # Azure internal noise
+    ]
+    if any(re.search(p, message) for p in noise_patterns):
         return None
     
     # Generate deterministic ID
