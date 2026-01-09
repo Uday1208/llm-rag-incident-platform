@@ -9,7 +9,7 @@ import logging
 from typing import List, Dict, Any, Optional, AsyncIterator
 from datetime import datetime, timedelta
 
-from .log_utils import parse_log_content
+from log_utils import parse_log_content
 
 from azure.storage.blob.aio import BlobServiceClient, ContainerClient
 from azure.core.exceptions import ResourceNotFoundError
