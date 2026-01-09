@@ -5,6 +5,7 @@ Groups normalized log entries by TraceID into coherent incident bundles.
 Handles time windowing and severity-based filtering.
 """
 
+import re
 import hashlib
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, field
@@ -213,56 +214,103 @@ class BatchTraceBundler:
     
     def bundle_dataframe(self, df: pd.DataFrame) -> List[Dict[str, Any]]:
         """
-        Group logs by trace_id and create bundles.
-        
-        Args:
-            df: DataFrame with normalized log entries
-            
-        Returns:
-            List of incident bundle dicts
+        Group logs by trace_id and create bundles with TraceID propagation.
         """
-        # Handle logs without trace_id by generating a synthetic one
-        # Synthetic Trace ID = service + timestamp_bucketed_by_5_min
-        def get_trace(row):
-            t_id = row.get("trace_id")
-            if pd.notna(t_id) and str(t_id) != "0":
-                return t_id
-            
-            # Generate synthetic ID
-            ts = row.get("timestamp")
-            service = row.get("service", "unknown")
-            if pd.isna(ts) or not isinstance(ts, (datetime, pd.Timestamp)):
-                return f"orphan-{service}-unknown"
-            
-            # Bucket by 5 minutes to group multi-line tracebacks
-            bucket = ts.replace(minute=(ts.minute // 5) * 5, second=0, microsecond=0)
-            return f"synth-{service}-{bucket.strftime('%Y%m%d%H%M')}"
-
-        df["trace_id"] = df.apply(get_trace, axis=1)
-        
-        if df["trace_id"].isna().all():
+        if df.empty:
             return []
+
+        # 1. Ensure timestamps are proper objects and sort
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        df = df.sort_values("timestamp").reset_index(drop=True)
         
-        # Map severity to numeric for comparison
+        # 2. Identify replica for each log (used for isolation and propagation)
+        def get_replica(row):
+            return row.get("container_group") or row.get("container_id") or row.get("revision") or "global"
+        
+        df["replica"] = df.apply(get_replica, axis=1)
+        
+        # 3. Propagate TraceIDs within the same replica
+        # If a log has no ID, it might belong to the previous active trace on that replica
+        last_trace = {} # (service, replica) -> (trace_id, timestamp)
+        
+        final_trace_ids = []
+        for _, row in df.iterrows():
+            t_id = row.get("trace_id")
+            service = row.get("service", "unknown")
+            replica = row["replica"]
+            ts = row["timestamp"]
+            key = (service, replica)
+            
+            # If we have a valid ID, update our "session" memory
+            if pd.notna(t_id) and str(t_id) != "0":
+                final_trace_ids.append(t_id)
+                last_trace[key] = (t_id, ts)
+                continue
+                
+            # If no ID, check if we can "borrow" from the last record in this replica
+            if key in last_trace:
+                prev_id, prev_ts = last_trace[key]
+                # If the previous log was recent (within 30s), use its TraceID
+                if pd.notna(ts) and pd.notna(prev_ts) and (ts - prev_ts).total_seconds() < 30:
+                    final_trace_ids.append(prev_id)
+                    continue
+            
+            # Otherwise, fall back to synthetic (bucketed by time)
+            if pd.notna(ts):
+                bucket = ts.replace(minute=(ts.minute // 5) * 5, second=0, microsecond=0)
+                synth_id = f"synth-{service}-{replica}-{bucket.strftime('%Y%m%d%H%M')}"
+                final_trace_ids.append(synth_id)
+            else:
+                final_trace_ids.append(f"orphan-{service}-{replica}-unknown")
+                
+        df["trace_id"] = final_trace_ids
+        
+        # 4. Filter and group
         df["sev_num"] = df["severity"].map(lambda x: SEVERITY_ORDER.get(x, 1))
-        
-        # Find traces with at least one log at or above min_severity
         min_sev_num = SEVERITY_ORDER.get(self.config.min_severity, 2)
+        
+        # Find traces that are relevant
         trace_max_sev = df.groupby("trace_id")["sev_num"].max()
         relevant_traces = trace_max_sev[trace_max_sev >= min_sev_num].index
         
-        bundles = []
+        # 5. Deduplicate similar incidents using content fingerprinting
+        fingerprints = {} # fingerprint -> bundle
+        
         for trace_id in relevant_traces:
             trace_logs = df[df["trace_id"] == trace_id].sort_values("timestamp")
             
-            # Limit logs per bundle
-            if len(trace_logs) > self.config.max_logs_per_bundle:
-                trace_logs = trace_logs.head(self.config.max_logs_per_bundle)
-            
             bundle = self._create_bundle(trace_id, trace_logs)
-            bundles.append(bundle)
+            
+            # Generate fingerprint to identify recurring errors
+            fp = self._generate_fingerprint(bundle["content"])
+            
+            if fp in fingerprints:
+                existing = fingerprints[fp]
+                
+                # Merge line ranges
+                ranges = [existing["raw_line_range"], bundle["raw_line_range"]]
+                merged_range = ", ".join(filter(None, ranges))
+                existing["raw_line_range"] = merged_range
+                
+                # Sum logs
+                existing["log_count"] += bundle["log_count"]
+                
+                # Keep earliest TS
+                if bundle["first_ts"] and (not existing["first_ts"] or bundle["first_ts"] < existing["first_ts"]):
+                    existing["first_ts"] = bundle["first_ts"]
+                
+                # Keep highest severity
+                if SEVERITY_ORDER.get(bundle["severity"], 1) > SEVERITY_ORDER.get(existing["severity"], 1):
+                    existing["severity"] = bundle["severity"]
+            else:
+                fingerprints[fp] = bundle
         
-        return bundles
+        final_bundles = list(fingerprints.values())
+        
+        # 6. Final Sort: return incidents in chronological order of their START time
+        final_bundles.sort(key=lambda b: b.get("first_ts") or datetime.min)
+        
+        return final_bundles
     
     def bundle_records(self, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
@@ -293,6 +341,15 @@ class BatchTraceBundler:
             if not first_op.empty:
                 operation = first_op.iloc[0]
         
+        # Get line range
+        line_range = None
+        if "raw_line" in logs_df.columns:
+            valid_lines = logs_df["raw_line"].dropna()
+            if not valid_lines.empty:
+                min_line = int(valid_lines.min())
+                max_line = int(valid_lines.max())
+                line_range = f"{min_line}-{max_line}" if min_line != max_line else str(min_line)
+
         # Get max severity
         max_sev_num = logs_df["sev_num"].max()
         severity = next((s for s, n in SEVERITY_ORDER.items() if n == max_sev_num), "INFO")
@@ -324,6 +381,7 @@ class BatchTraceBundler:
             "log_count": len(logs_df),
             "first_ts": first_ts,
             "last_ts": last_ts,
+            "raw_line_range": line_range,
         }
     
     def _format_content(self, logs_df: pd.DataFrame) -> str:
@@ -341,6 +399,7 @@ class BatchTraceBundler:
         # Sort logs by timestamp
         sorted_logs = logs_df.sort_values("timestamp")
         
+        last_sev = None
         for _, row in sorted_logs.iterrows():
             sev = row.get("severity", "INFO")
             msg = row.get("message", "").strip()
@@ -356,7 +415,13 @@ class BatchTraceBundler:
             
             seen_messages.add(msg)
             
-            line = f"[{sev}] {msg}"
+            # Clean traceback formatting: omit prefix if same as previous line (multi-line tracebacks)
+            if sev == last_sev and (msg.startswith("File \"") or msg.startswith("Traceback") or msg.startswith("  ")):
+                line = f"            {msg}"
+            else:
+                line = f"[{sev}] {msg}"
+            
+            last_sev = sev
             
             # Add stack trace if explicitly present
             if "stack_trace" in row and pd.notna(row["stack_trace"]):
@@ -370,3 +435,48 @@ class BatchTraceBundler:
             char_count += len(line)
         
         return "\n".join(lines)
+
+    def _generate_fingerprint(self, content: str) -> str:
+        """
+        Create a stable fingerprint of log content by stripping dynamic strings.
+        Now operates on unique line patterns to handle sampling and volume variations.
+        """
+        if not content:
+            return "empty"
+            
+        unique_patterns = set()
+        
+        # Split content into lines to analyze patterns
+        for line in content.splitlines():
+            # 1. Normalize whitespace and case
+            p = line.lower().strip()
+            
+            # 2. Strip Hex IDs (TraceIDs, SpanIDs, etc.)
+            p = re.sub(r'[a-f0-9]{32}', '[id32]', p)
+            p = re.sub(r'[a-f0-9]{16}', '[id16]', p)
+            p = re.sub(r'0x[a-f0-9]+', '[hex]', p)
+            
+            # 3. Strip Timestamps (ISO and variations)
+            p = re.sub(r'\d{4}-\d{2}-\d{2}[t\s]\d{2}:\d{2}:\d{2}(\.\d+)?(z|[+-]\d{2}:?\d{2})?', '[ts]', p)
+            p = re.sub(r'\d{2}:\d{2}:\d{2}(,\d{3})?', '[time]', p)
+            
+            # 4. Strip Variable numbers (ports, counts, indices)
+            p = re.sub(r'\b\d+\b', '[num]', p)
+            
+            # 5. Strip common dynamic paths/URLs segments
+            p = re.sub(r'https?://[^\s]+', '[url]', p)
+            
+            # 6. Strip trailing punctuation and extra whitespace
+            p = p.strip('.:; ')
+            
+            if p:
+                unique_patterns.add(p)
+        
+        if not unique_patterns:
+            return "empty"
+            
+        # Sort patterns to ensure stable hash regardless of message order
+        stable_content = "\n".join(sorted(list(unique_patterns)))
+        
+        # Take hash as fingerprint
+        return hashlib.md5(stable_content.encode()).hexdigest()

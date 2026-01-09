@@ -9,6 +9,8 @@ import logging
 from typing import List, Dict, Any, Optional, AsyncIterator
 from datetime import datetime, timedelta
 
+from .log_utils import parse_log_content
+
 from azure.storage.blob.aio import BlobServiceClient, ContainerClient
 from azure.core.exceptions import ResourceNotFoundError
 
@@ -40,7 +42,7 @@ class BlobReader:
         prefix: str,
         since: Optional[datetime] = None,
         until: Optional[datetime] = None,
-    ) -> List[str]:
+    ) -> List[Any]:
         """
         List blobs matching prefix and optional time range.
         
@@ -50,7 +52,7 @@ class BlobReader:
             until: Only include blobs modified before this time
             
         Returns:
-            List of blob names
+            List of blob properties objects
         """
         blobs = []
         async for blob in self.container.list_blobs(name_starts_with=prefix):
@@ -59,7 +61,7 @@ class BlobReader:
                 continue
             if until and blob.last_modified > until:
                 continue
-            blobs.append(blob.name)
+            blobs.append(blob)
         
         log.info(f"Found {len(blobs)} blobs with prefix '{prefix}'")
         return blobs
@@ -67,55 +69,70 @@ class BlobReader:
     async def list_blobs_for_date(self, prefix: str, date: datetime) -> List[str]:
         """List blobs for a specific date (App Insights format: YYYY/MM/DD/)."""
         date_prefix = f"{prefix}{date.strftime('%Y/%m/%d')}/"
-        return await self.list_blobs(date_prefix)
+        blobs = await self.list_blobs(date_prefix)
+        return [b.name for b in blobs]
     
     async def list_unprocessed_blobs(
         self,
         source_prefix: str,
         processed_prefix: str,
         limit: int = 100,
-    ) -> List[str]:
+    ) -> List[Dict[str, Any]]:
         """
-        List blobs that haven't been processed yet.
+        List blobs that haven't been processed yet or have new data.
         
-        Uses a marker file approach: after processing blob X,
-        we create a marker at processed_prefix/X.done
+        Returns:
+            List of dicts: {"name": str, "offset": int}
         """
         source_blobs = await self.list_blobs(source_prefix)
         
         unprocessed = []
-        for blob_name in source_blobs:
+        for src_blob in source_blobs:
+            blob_name = src_blob.name
             marker_name = f"{processed_prefix}{blob_name}.done"
+            
             try:
-                await self.container.get_blob_client(marker_name).get_blob_properties()
-                # Marker exists, blob already processed
-                continue
-            except ResourceNotFoundError:
-                unprocessed.append(blob_name)
+                marker_client = self.container.get_blob_client(marker_name)
+                stream = await marker_client.download_blob()
+                marker_data = json.loads(await stream.readall())
+                
+                last_size = marker_data.get("offset", 0)
+                
+                # If source is LARGER than last processed size, we have new data
+                if src_blob.size > last_size:
+                    log.info(f"Blob {blob_name} has new data: {last_size} -> {src_blob.size} bytes")
+                    unprocessed.append({"name": blob_name, "offset": last_size})
+                else:
+                    # Already fully processed
+                    continue
+            except (ResourceNotFoundError, json.JSONDecodeError, ValueError):
+                # Marker doesn't exist or is invalid, process from start
+                unprocessed.append({"name": blob_name, "offset": 0})
             
             if len(unprocessed) >= limit:
                 break
         
-        log.info(f"Found {len(unprocessed)} unprocessed blobs")
+        log.info(f"Found {len(unprocessed)} blobs with new data")
         return unprocessed
     
-    async def read_blob(self, blob_name: str) -> str:
-        """Read blob content as string."""
+    async def read_blob(self, blob_name: str, offset: int = 0) -> str:
+        """Read blob content as string starting from offset."""
         blob_client = self.container.get_blob_client(blob_name)
-        download = await blob_client.download_blob()
+        
+        # Get current size to know where we stop
+        props = await blob_client.get_blob_properties()
+        total_size = props.size
+        
+        if offset >= total_size:
+            return ""
+            
+        download = await blob_client.download_blob(offset=offset)
         content = await download.readall()
         return content.decode("utf-8")
     
-    async def read_blob_json(self, blob_name: str) -> List[Dict[str, Any]]:
-        """
-        Read and parse blob as JSON/JSONL.
-        
-        Handles:
-        - JSONL (one JSON object per line)
-        - Single JSON object
-        - Azure export format ({"records": [...]})
-        """
-        content = await self.read_blob(blob_name)
+    async def read_blob_json(self, blob_name: str, offset: int = 0) -> List[Dict[str, Any]]:
+        """Read and parse blob as JSON starting from offset."""
+        content = await self.read_blob(blob_name, offset=offset)
         return parse_log_content(content)
     
     async def stream_blobs(
@@ -134,62 +151,22 @@ class BlobReader:
                 continue
     
     async def mark_processed(self, blob_name: str, processed_prefix: str) -> None:
-        """Create a marker indicating blob has been processed."""
+        """Create a marker indicating current size of processed blob."""
         marker_name = f"{processed_prefix}{blob_name}.done"
-        blob_client = self.container.get_blob_client(marker_name)
-        await blob_client.upload_blob(
-            datetime.utcnow().isoformat().encode(),
+        
+        # Get current source size
+        blob_client = self.container.get_blob_client(blob_name)
+        props = await blob_client.get_blob_properties()
+        
+        marker_data = {
+            "offset": props.size,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        marker_client = self.container.get_blob_client(marker_name)
+        await marker_client.upload_blob(
+            json.dumps(marker_data).encode(),
             overwrite=True
         )
 
 
-def parse_log_content(content: str) -> List[Dict[str, Any]]:
-    """
-    Parse log content in various formats.
-    
-    Supports:
-    - JSONL (newline-delimited JSON)
-    - Single JSON object
-    - Azure export format ({"records": [...]})
-    """
-    content = content.strip()
-    if not content:
-        return []
-    
-    records = []
-    
-    # Try JSONL first (most common for streaming exports)
-    if content.startswith("{") and "\n" in content:
-        for line in content.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-                if isinstance(obj, dict):
-                    # Handle Azure export envelope
-                    if "records" in obj and isinstance(obj["records"], list):
-                        records.extend(obj["records"])
-                    else:
-                        records.append(obj)
-                elif isinstance(obj, list):
-                    records.extend(obj)
-            except json.JSONDecodeError:
-                continue
-        
-        if records:
-            return records
-    
-    # Try single JSON
-    try:
-        obj = json.loads(content)
-        if isinstance(obj, dict):
-            if "records" in obj and isinstance(obj["records"], list):
-                return obj["records"]
-            return [obj]
-        if isinstance(obj, list):
-            return obj
-    except json.JSONDecodeError:
-        pass
-    
-    return records

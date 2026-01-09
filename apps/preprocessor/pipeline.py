@@ -53,7 +53,7 @@ class ProcessingPipeline:
         Process a list of blobs.
         
         Args:
-            blob_names: List of blob names to process
+            blob_names: List of blob names or dicts with name/offset
             
         Returns:
             Processing statistics
@@ -72,9 +72,17 @@ class ProcessingPipeline:
             self.config.blob_container
         ) as reader:
             
-            for blob_name in blob_names:
+            for blob_item in blob_names:
+                # Handle both simple names and offset dicts
+                if isinstance(blob_item, dict):
+                    blob_name = blob_item["name"]
+                    offset = blob_item.get("offset", 0)
+                else:
+                    blob_name = blob_item
+                    offset = 0
+                    
                 try:
-                    blob_stats = await self._process_single_blob(reader, blob_name)
+                    blob_stats = await self._process_single_blob(reader, blob_name, offset=offset)
                     stats["blobs_processed"] += 1
                     stats["logs_read"] += blob_stats["logs_read"]
                     stats["logs_normalized"] += blob_stats["logs_normalized"]
@@ -91,12 +99,13 @@ class ProcessingPipeline:
         self,
         reader: BlobReader,
         blob_name: str,
+        offset: int = 0
     ) -> Dict[str, int]:
         """Process a single blob."""
-        log.info(f"Processing blob: {blob_name}")
+        log.info(f"Processing blob: {blob_name} (offset: {offset})")
         
         # 1. Read and parse logs
-        records = await reader.read_blob_json(blob_name)
+        records = await reader.read_blob_json(blob_name, offset=offset)
         logs_read = len(records)
         
         # 2. Normalize to canonical format

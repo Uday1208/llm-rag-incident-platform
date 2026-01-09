@@ -205,9 +205,21 @@ def extract_severity(payload: Dict[str, Any]) -> str:
             if normalized:
                 return normalized
     
-    # NEW: Detect stderr and elevate to ERROR
+    # Detect stderr and elevate to ERROR, with exceptions for lifecycle chatter
     stream = payload.get("Stream") or dims.get("Stream")
+    message = extract_message(payload)
+    
     if stream == "stderr":
+        # Search for lifecycle markers that shouldn't be ERROR
+        lifecycle_markers = [
+            "Started server", "Waiting for application", "Application startup complete",
+            "Application shutdown complete", "Shutting down", "Finished server process", 
+            "Uvicorn running on", "Stopping job", "Next run at", "Waiting for background tasks",
+            "pulling manifest", "pulling ", "verifying sha256 digest", "writing manifest"
+        ]
+        # Success and progress bars (Ollama often logs these to stderr)
+        if any(m in message for m in lifecycle_markers) or "█" in message or "▏" in message or "success" in message.lower():
+            return "INFO"
         return "ERROR"
     
     # Infer from message content
@@ -338,8 +350,12 @@ def normalize_app_insights(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         r"^Request method:", 
         r"^Request headers:", 
         r"^Response headers:",
-        r"^Response status: 20[0-9]",  # Skip successful response status lines
-        r"Managed Identity token",     # Azure internal noise
+        r"^Response status: 20[0-9]",     # Skip successful response status lines
+        r"Managed Identity token",        # Azure internal noise
+        r"\"GET /health HTTP/1\.1\" 20",  # Health checks
+        r"\"GET / HTTP/1\.1\" 404",      # Root probes
+        r"favicon\.ico",                  # Browser junk
+        r"Job.*executed successfully",    # Routine job noise
     ]
     if any(re.search(p, message) for p in noise_patterns):
         return None
@@ -361,6 +377,9 @@ def normalize_app_insights(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         
         # Environment context
         "environment": (payload.get("customDimensions") or {}).get("Environment"),
+        "container_group": (payload.get("customDimensions") or {}).get("ContainerGroupName"),
+        "container_id": (payload.get("customDimensions") or {}).get("ContainerId"),
+        "revision": (payload.get("customDimensions") or {}).get("RevisionName"),
         
         # Original App Insights metadata
         "item_type": payload.get("itemType"),
@@ -368,6 +387,9 @@ def normalize_app_insights(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         
         # Exception details if applicable
         **extract_exception_details(payload),
+
+        # Correlation context
+        "raw_line": payload.get("_line_index"),
     }
     
     return doc
