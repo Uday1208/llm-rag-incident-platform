@@ -187,6 +187,8 @@ def extract_severity(payload: Dict[str, Any]) -> str:
     Extract and normalize severity level.
     Handles both numeric (App Insights) and string formats.
     """
+    dims = payload.get("customDimensions") or payload.get("properties") or {}
+    
     # Try numeric severityLevel first (App Insights standard)
     sev_level = payload.get("severityLevel")
     if sev_level is not None:
