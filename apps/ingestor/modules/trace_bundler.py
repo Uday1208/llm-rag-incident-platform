@@ -221,12 +221,26 @@ class BatchTraceBundler:
         Returns:
             List of incident bundle dicts
         """
-        if df.empty or "trace_id" not in df.columns:
-            return []
+        # Handle logs without trace_id by generating a synthetic one
+        # Synthetic Trace ID = service + timestamp_bucketed_by_5_min
+        def get_trace(row):
+            t_id = row.get("trace_id")
+            if pd.notna(t_id) and str(t_id) != "0":
+                return t_id
+            
+            # Generate synthetic ID
+            ts = row.get("timestamp")
+            service = row.get("service", "unknown")
+            if pd.isna(ts) or not isinstance(ts, (datetime, pd.Timestamp)):
+                return f"orphan-{service}-unknown"
+            
+            # Bucket by 5 minutes to group multi-line tracebacks
+            bucket = ts.replace(minute=(ts.minute // 5) * 5, second=0, microsecond=0)
+            return f"synth-{service}-{bucket.strftime('%Y%m%d%H%M')}"
+
+        df["trace_id"] = df.apply(get_trace, axis=1)
         
-        # Filter out logs without trace_id
-        df = df[df["trace_id"].notna()].copy()
-        if df.empty:
+        if df["trace_id"].isna().all():
             return []
         
         # Map severity to numeric for comparison

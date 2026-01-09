@@ -108,7 +108,7 @@ def _expand_nested_json(payload: Dict[str, Any]) -> None:
                         if k not in payload:
                             payload[k] = v
                         # Special case for logging fields we definitely want from the app
-                        if k in ["otelTraceId", "otelSpanId", "service", "name", "level", "levelname"]:
+                        if k in ["otelTraceId", "otelSpanId", "service", "name", "level", "levelname", "Stream"]:
                             payload[k] = v
             except (json.JSONDecodeError, TypeError):
                 continue
@@ -196,12 +196,17 @@ def extract_severity(payload: Dict[str, Any]) -> str:
             pass
     
     # Try string severity fields
-    for key in ("severity", "level", "Level", "logLevel"):
+    for key in ("severity", "level", "Level", "logLevel", "levelname"):
         sev = payload.get(key)
         if sev:
             normalized = SEVERITY_NORMALIZE.get(str(sev).lower().strip())
             if normalized:
                 return normalized
+    
+    # NEW: Detect stderr and elevate to ERROR
+    stream = payload.get("Stream") or dims.get("Stream")
+    if stream == "stderr":
+        return "ERROR"
     
     # Infer from message content
     message = extract_message(payload)
@@ -269,10 +274,10 @@ def infer_severity_from_message(message: str) -> str:
     msg_upper = message.upper()
     
     # Exception/error patterns
-    if any(p in msg_upper for p in ["EXCEPTION", "TRACEBACK", "FATAL", "CRITICAL"]):
+    if any(p in msg_upper for p in ["TRACEBACK", "FATAL", "CRITICAL"]):
         return "CRITICAL"
     
-    if any(p in msg_upper for p in ["ERROR", "FAILED", "FAILURE"]):
+    if any(p in msg_upper for p in ["EXCEPTION", "ERROR", "FAILED", "FAILURE", "MODULE_NOT_FOUND"]):
         return "ERROR"
     
     # HTTP status codes
