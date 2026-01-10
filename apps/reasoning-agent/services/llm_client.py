@@ -161,6 +161,7 @@ async def _ollama_chat(
     for attempt in range(config.retries + 1):
         try:
             async with httpx.AsyncClient(timeout=config.timeout) as client:
+                log.info(f"Ollama attempt {attempt+1}/{config.retries+1} calling: {url}")
                 response = await client.post(url, json=payload)
                 
                 if response.status_code >= 500:
