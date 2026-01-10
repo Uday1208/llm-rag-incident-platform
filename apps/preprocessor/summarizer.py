@@ -83,7 +83,7 @@ class IncidentSummarizer:
             
         except Exception as e:
             # Soft fail: If LLM summary fails, log and return empty summary
-            log.warning(f"LLM summarization (via agent) failed: {e}")
+            log.warning(f"LLM summarization (via agent) failed: {repr(e)}")
             return {
                 "symptoms": None,
                 "failing_dependency": None,
