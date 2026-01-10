@@ -43,6 +43,7 @@ class PreprocessorConfig:
     # Output
     rag_worker_url: str
     rag_worker_token: Optional[str]
+    reasoning_agent_url: str
     
     # LLM for summarization (optional)
     enable_llm_summary: bool
@@ -72,6 +73,7 @@ class PreprocessorConfig:
             
             rag_worker_url=os.getenv("RAG_WORKER_URL", "http://rag-worker:8000"),
             rag_worker_token=os.getenv("RAG_WORKER_TOKEN"),
+            reasoning_agent_url=os.getenv("REASONING_AGENT_URL", "http://reasoning-agent:8080"),
             
             enable_llm_summary=os.getenv("ENABLE_LLM_SUMMARY", "true").lower() == "true",
         )

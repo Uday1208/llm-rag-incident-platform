@@ -28,7 +28,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
-from routers import reason_router, search_router
+from routers import reason_router, search_router, llm
 from routers.agent import router as agent_router
 from logging_setup import configure_logging
 
@@ -56,6 +56,7 @@ FastAPIInstrumentor.instrument_app(app)
 app.include_router(reason_router)
 app.include_router(search_router)
 app.include_router(agent_router)  # Agentic resolution
+app.include_router(llm.router)
 
 
 @app.get("/health")

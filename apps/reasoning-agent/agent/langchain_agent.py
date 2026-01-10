@@ -46,7 +46,7 @@ except ImportError:
 
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
 LLM_MODEL = os.getenv("LLM_MODEL", "qwen2.5:7b")
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://local-llm:11434")
 AOAI_ENDPOINT = os.getenv("AOAI_ENDPOINT", "")
 AOAI_KEY = os.getenv("AOAI_KEY", "")
 AOAI_DEPLOYMENT = os.getenv("AOAI_CHAT_DEPLOYMENT", "")

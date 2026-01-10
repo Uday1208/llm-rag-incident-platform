@@ -82,7 +82,7 @@ class LLMConfig:
             max_tokens=int(os.getenv("LLM_MAX_TOKENS", "1024")),
             timeout=float(os.getenv("LLM_TIMEOUT", "60")),
             retries=int(os.getenv("LLM_RETRIES", "2")),
-            ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+            ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://local-llm:11434"),
             azure_endpoint=os.getenv("AOAI_ENDPOINT"),
             azure_api_key=os.getenv("AOAI_KEY"),
             azure_deployment=os.getenv("AOAI_CHAT_DEPLOYMENT"),

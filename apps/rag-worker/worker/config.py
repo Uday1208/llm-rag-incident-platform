@@ -142,7 +142,7 @@ class LLMConfig:
             timeout_seconds=float(os.getenv("LLM_TIMEOUT", "60")),
             
             # Ollama
-            ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+            ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://local-llm:11434"),
             
             # Azure OpenAI
             azure_endpoint=os.getenv("AOAI_ENDPOINT"),

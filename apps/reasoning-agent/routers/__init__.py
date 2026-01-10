@@ -5,9 +5,10 @@
 #from .search import router as search_router
 from routers.reason import router as reason_router
 from routers.search import router as search_router
+from routers.llm import router as llm_router
 
 routers = [
-    #health_router,
     reason_router,
     search_router,
+    llm_router,
 ]
