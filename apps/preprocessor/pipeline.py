@@ -41,7 +41,7 @@ class ProcessingPipeline:
     
     def __init__(self, config: PreprocessorConfig):
         self.config = config
-        self.summarizer = IncidentSummarizer() if config.enable_llm_summary else None
+        self.summarizer = IncidentSummarizer(reasoning_agent_url=config.reasoning_agent_url) if config.enable_llm_summary else None
         self.bundler = BatchTraceBundler(BundlerConfig(
             window_seconds=config.trace_window_seconds,
             min_severity=config.min_severity,

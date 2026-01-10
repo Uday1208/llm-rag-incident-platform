@@ -21,7 +21,7 @@ log = logging.getLogger("preprocessor.summarizer")
 
 # Default reasoning agent URL (internal service name)
 REASONING_AGENT_URL = os.getenv("REASONING_AGENT_URL", "http://reasoning-agent:8080")
-LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "60"))
+LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "120"))
 
 
 # =============================================================================

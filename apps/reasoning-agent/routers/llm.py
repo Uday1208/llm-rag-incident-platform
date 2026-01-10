@@ -27,6 +27,7 @@ async def summarize(req: SummarizeRequest):
     Summarize an incident bundle into structured fields.
     This replaces direct Ollama calls from the preprocessor.
     """
+    log.info(f"Received summarization request for service: {req.service}")
     client = LLMClient.from_config()
     
     system_prompt = """You are an expert SRE analyzing incident logs. 
@@ -49,11 +50,13 @@ Logs:
 """
     
     try:
+        log.info(f"Calling Ollama/LLM for summarization... (service: {req.service})")
         # Use simple chat for now, expecting JSON in response
         response_text = await client.chat(
             messages=[{"role": "user", "content": user_message}],
             system_prompt=system_prompt
         )
+        log.info(f"Ollama/LLM responded successfully for {req.service}")
         
         # Basic JSON extraction if LLM is chatty
         import json
@@ -68,6 +71,7 @@ Logs:
             if match:
                 data = json.loads(match.group(0))
             else:
+                log.warning(f"No JSON found in response from LLM: {response_text[:200]}...")
                 raise ValueError("No JSON found in response")
                 
         return SummarizeResponse(
@@ -77,6 +81,6 @@ Logs:
         )
         
     except Exception as e:
-        log.error(f"Summarization failed: {e}")
+        log.error(f"Summarization processing failed for {req.service}: {repr(e)}")
         # Always return structured empty response rather than 500 to keep pipeline moving
         return SummarizeResponse(symptoms=None, failing_dependency=None, error_signature=None)
