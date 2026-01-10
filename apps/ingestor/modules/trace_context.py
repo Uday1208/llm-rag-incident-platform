@@ -372,7 +372,7 @@ def normalize_app_insights(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "service": service,
         "operation": operation,
         "severity": severity,
-        "message": message.strip()[:5000],  # Limit length
+        "message": message.rstrip()[:5000],  # Limit length
         "timestamp": timestamp,
         
         # Environment context

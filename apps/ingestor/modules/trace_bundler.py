@@ -400,14 +400,44 @@ class BatchTraceBundler:
         sorted_logs = logs_df.sort_values("timestamp")
         
         last_sev = None
+        in_traceback = False
+        skip_segment = False
+        
         for _, row in sorted_logs.iterrows():
             sev = row.get("severity", "INFO")
-            msg = row.get("message", "").strip()
+            msg = row.get("message", "").rstrip()
             
             # Simple deduplication: skip if message seen recently in this trace
             if msg in seen_messages:
                 continue
             
+            # Traceback filtering logic
+            is_file_line = 'File "' in msg and (", line " in msg or "line " in msg)
+            is_traceback_start = "Traceback (most recent call last):" in msg
+            
+            if is_traceback_start:
+                in_traceback = True
+                skip_segment = False
+            elif is_file_line:
+                # Decide if we skip this segment (internal libs vs custom code)
+                is_internal = any(p in msg for p in ["<frozen", "runpy.py", "lib/python", "site-packages"])
+                skip_segment = is_internal
+                
+                # Global rule: if it's an internal file line, we always skip it
+                if is_internal:
+                    continue
+            elif msg.startswith(" "):
+                # If it's a continuation line and we are in a skip zone, skip it
+                if skip_segment:
+                    continue
+            else:
+                # It's a non-indented line. Not a traceback start or file line.
+                # It's likely the final exception or a new log message.
+                in_traceback = False
+                skip_segment = False
+            
+            # If we were in a skipped traceback and hit a file line, we already skipped it above
+
             # If we have real errors, skip generic INFO chatter like "Response status: 200"
             if has_errors and SEVERITY_ORDER.get(sev, 1) < SEVERITY_ORDER["WARNING"]:
                 if any(p in msg for p in ["Response status: 20", "Request URL", "Job", "Scheduler"]):
@@ -415,8 +445,11 @@ class BatchTraceBundler:
             
             seen_messages.add(msg)
             
-            # Clean traceback formatting: omit prefix if same as previous line (multi-line tracebacks)
-            if sev == last_sev and (msg.startswith("File \"") or msg.startswith("Traceback") or msg.startswith("  ")):
+            # Clean traceback formatting: omit prefix if same as previous line
+            is_traceback_cont = msg.startswith(" ") or is_file_line or is_traceback_start
+            is_exception_marker = "During handling of the above exception" in msg or "The above exception was the direct cause" in msg
+            
+            if sev == last_sev and (is_traceback_cont or is_exception_marker):
                 line = f"            {msg}"
             else:
                 line = f"[{sev}] {msg}"
