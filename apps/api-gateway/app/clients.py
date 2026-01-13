@@ -73,3 +73,43 @@ async def call_ts_score(http: httpx.AsyncClient, lines: list[str]) -> dict:
     resp = await http.post(url, json={"lines": lines}, headers={"Content-Type": "application/json"})
     resp.raise_for_status()
     return resp.json()
+
+@retry(
+    stop=stop_after_attempt(2),
+    wait=wait_exponential(multiplier=0.3, min=0.3, max=2),
+    retry=retry_if_exception_type(httpx.HTTPError),
+    reraise=True,
+)
+async def list_incidents_from_worker(http: httpx.AsyncClient, limit: int = 50) -> dict:
+    """Call rag-worker /v1/incidents to list recent incidents."""
+    url = f"{settings.RAG_WORKER_URL}/v1/incidents"
+    resp = await http.get(url, params={"limit": limit})
+    resp.raise_for_status()
+    return resp.json()
+
+@retry(
+    stop=stop_after_attempt(2),
+    wait=wait_exponential(multiplier=0.3, min=0.3, max=2),
+    retry=retry_if_exception_type(httpx.HTTPError),
+    reraise=True,
+)
+async def get_incident_from_worker(http: httpx.AsyncClient, incident_id: str) -> dict:
+    """Call rag-worker /v1/incidents/{id} to get details."""
+    url = f"{settings.RAG_WORKER_URL}/v1/incidents/{incident_id}"
+    resp = await http.get(url)
+    resp.raise_for_status()
+    return resp.json()
+@retry(
+    stop=stop_after_attempt(2),
+    wait=wait_exponential(multiplier=0.3, min=0.3, max=2),
+    retry=retry_if_exception_type(httpx.HTTPError),
+    reraise=True,
+)
+async def call_reasoning_agent(http: httpx.AsyncClient, query: str) -> dict:
+    """Call reasoning-agent /v1/reason to generate analysis."""
+    url = f"{settings.REASONING_AGENT_URL}/v1/reason"
+    resp = await http.post(url, json={"query": query})
+    resp.raise_for_status()
+    return resp.json()
+
+

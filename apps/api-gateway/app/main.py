@@ -7,7 +7,9 @@ from fastapi import FastAPI, Request
 from contextlib import asynccontextmanager
 from .logging_setup import configure_logging
 from .instrumentation import setup_metrics, REQUESTS, LATENCY
-from .routers import health, metrics, query
+from .routers import health, metrics, query, incidents, resolutions
+
+
 from .clients import init_clients, close_clients
 
 @asynccontextmanager
@@ -25,6 +27,16 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# CORS
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:4200", "http://127.0.0.1:4200", "http://localhost:8000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Simple request timing middleware for metrics
 @app.middleware("http")
 async def prometheus_middleware(request: Request, call_next):
@@ -39,3 +51,7 @@ async def prometheus_middleware(request: Request, call_next):
 app.include_router(health.router, prefix="", tags=["system"])
 app.include_router(metrics.router, prefix="", tags=["system"])
 app.include_router(query.router, prefix="/v1", tags=["query"])
+app.include_router(incidents.router, prefix="/v1", tags=["incidents"])
+app.include_router(resolutions.router, prefix="/v1", tags=["resolutions"])
+
+

@@ -68,3 +68,39 @@ def search_by_embedding(query_vec: list[float], top_k: int) -> List[Tuple[str, s
             cur.execute(sql, params)
             rows = cur.fetchall()
     return [(r[0], r[1], float(r[2]) if r[2] is not None else 0.0) for r in rows]
+
+
+def get_recent_bundles(limit: int = 50) -> List[Tuple]:
+    """Fetch recent incident bundles for the dashboard."""
+    sql = """
+    SELECT id, trace_id, service, severity, symptoms, error_signature, first_ts, content
+    FROM incident_bundles
+    ORDER BY first_ts DESC NULLS LAST
+    LIMIT %s;
+    """
+    try:
+        with DB_TIME.labels(route="list_incidents").time():
+            with get_conn() as conn, conn.cursor() as cur:
+                cur.execute(sql, (limit,))
+                rows = cur.fetchall()
+        return rows
+    except Exception:
+        # If table doesn't exist or other error, return empty
+        return []
+
+
+def get_bundle(bundle_id: str) -> Optional[Tuple]:
+    """Fetch a single incident bundle by ID."""
+    sql = """
+    SELECT id, trace_id, service, severity, symptoms, error_signature, first_ts, content
+    FROM incident_bundles
+    WHERE id = %s;
+    """
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(sql, (bundle_id,))
+            return cur.fetchone()
+    except Exception:
+        return None
+
+

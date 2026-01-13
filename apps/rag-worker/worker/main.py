@@ -27,6 +27,8 @@ from .config import settings                                      # typed settin
 from .routers import embed_api
 from .routers import internal_search
 from .routers import export
+from .routers import incidents
+
 
 log = logging.getLogger("rag-worker")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -105,3 +107,5 @@ app.include_router(rag.router,      prefix="/v1", tags=["rag"])
 app.include_router(embed_api.router, prefix="")
 app.include_router(internal_search.router, prefix="")
 app.include_router(export.router, prefix="")
+app.include_router(incidents.router, prefix="/v1", tags=["incidents"])
+

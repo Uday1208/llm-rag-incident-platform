@@ -13,6 +13,7 @@ class Settings(BaseSettings):
 
     # Downstream services
     RAG_WORKER_URL: AnyUrl = "http://rag-worker:8081"
+    REASONING_AGENT_URL: AnyUrl = "http://reasoning-agent:8082"
     TS_MODEL_URL: str = ""  # optional; when set, gateway will enrich with anomaly scoring
 
     # Redis (rate limit / cache)
