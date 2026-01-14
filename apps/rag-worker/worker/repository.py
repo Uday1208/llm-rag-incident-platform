@@ -3,7 +3,8 @@ File: repository.py
 Purpose: Data access layer for documents (upsert, search).
 """
 
-from typing import Iterable, List, Tuple
+from typing import Iterable, List, Tuple, Optional
+
 from .db import get_conn, has_cosine_operator
 from .instrumentation import DB_TIME
 from .config import settings  # ensures settings.VECTOR_SQLTYPE like "vector(384)"
