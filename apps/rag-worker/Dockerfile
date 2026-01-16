@@ -19,6 +19,7 @@ RUN pip install -r requirements.txt
 
 # App code
 COPY worker ./worker
+COPY tools ./tools
 
 # Non-root
 RUN useradd -m -u 10002 appuser
