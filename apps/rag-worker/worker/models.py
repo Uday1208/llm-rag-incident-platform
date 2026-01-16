@@ -1,15 +1,3 @@
-"""
-SQLAlchemy models for the LLM-RAG Incident Platform.
-
-Tables:
-- incident_bundles: TraceID-correlated incident groups with embeddings
-- resolutions: Past resolutions linked to incidents
-- agent_sessions: Agentic conversation history
-- documents: Legacy table (backward compatibility)
-
-Vector dimension is configurable via EMBED_DIM env var (default: 384 for MiniLM).
-"""
-
 import os
 from datetime import datetime
 from typing import Optional, List, Dict, Any
@@ -20,8 +8,6 @@ from sqlalchemy import (
 )
 
 # Configurable vector dimension (must match embedding model)
-# Default: 384 for all-MiniLM-L6-v2
-# Set to 1536 for text-embedding-ada-002
 VECTOR_DIM = int(os.getenv("EMBED_DIM", "384"))
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import JSONB
@@ -58,86 +44,19 @@ class AgentSessionStatus:
 # Core Tables
 # =============================================================================
 
-class IncidentBundle(Base):
-    """
-    TraceID-correlated incident bundle.
-    Groups related log entries from a distributed trace.
-    """
-    __tablename__ = "incident_bundles"
-    
-    # Primary key
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    
-    # Trace context (from Application Insights)
-    trace_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    span_id: Mapped[Optional[str]] = mapped_column(String(64))
-    
-    # Service identification
-    service: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
-    operation: Mapped[Optional[str]] = mapped_column(String(256))
-    environment: Mapped[Optional[str]] = mapped_column(String(32))
-    
-    # Severity
-    severity: Mapped[str] = mapped_column(
-        String(16), 
-        nullable=False, 
-        index=True,
-        default=SeverityLevel.INFO
-    )
-    
-    # Structured summary (GPT-4o-mini generated)
-    symptoms: Mapped[Optional[str]] = mapped_column(Text)
-    failing_dependency: Mapped[Optional[str]] = mapped_column(String(256))
-    error_signature: Mapped[Optional[str]] = mapped_column(String(512))
-    
-    # Full content for search
-    content: Mapped[str] = mapped_column(Text, nullable=False)
-    
-    # Vector embedding (dimension from EMBED_DIM env var)
-    # Default: 384 for MiniLM, 1536 for Azure OpenAI
-    embedding: Mapped[Optional[List[float]]] = mapped_column(Vector(VECTOR_DIM))
-    
-    # Metadata
-    log_count: Mapped[int] = mapped_column(Integer, default=1)
-    first_ts: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
-    last_ts: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), 
-        default=datetime.utcnow
-    )
-    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
-    
-    # Source reference
-    raw_blob_path: Mapped[Optional[str]] = mapped_column(String(512))
-    
-    # Additional metadata (flexible schema)
-    metadata_: Mapped[Optional[Dict]] = mapped_column("metadata", JSONB)
-    
-    # Relationships
-    resolutions: Mapped[List["Resolution"]] = relationship(
-        back_populates="bundle",
-        cascade="all, delete-orphan"
-    )
-    
-    __table_args__ = (
-        Index("idx_bundles_first_ts", "first_ts"),
-        Index("idx_bundles_service_severity", "service", "severity"),
-    )
-
 
 class Resolution(Base):
     """
-    Resolution record linked to an incident bundle.
+    Resolution record linked to an incident.
     Stores runbook steps and effectiveness feedback.
     """
     __tablename__ = "resolutions"
     
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     
-    # Link to incident
-    bundle_id: Mapped[Optional[str]] = mapped_column(
+    # Link to incident (actual table uses incident_id)
+    incident_id: Mapped[Optional[str]] = mapped_column(
         String(64), 
-        ForeignKey("incident_bundles.id", ondelete="SET NULL"),
         index=True
     )
     
@@ -148,7 +67,7 @@ class Resolution(Base):
     preventive_action: Mapped[Optional[str]] = mapped_column(Text)
     
     # Vector embedding for resolution search
-    embedding: Mapped[Optional[List[float]]] = mapped_column(Vector(VECTOR_DIM))
+    embedding: Mapped[List[float]] = mapped_column(Vector(VECTOR_DIM), nullable=True)
     
     # Metadata
     created_by: Mapped[str] = mapped_column(String(128), default="system")
@@ -163,11 +82,7 @@ class Resolution(Base):
     
     # Tags for categorization
     tags: Mapped[Optional[List[str]]] = mapped_column(JSONB)
-    
-    # Relationship
-    bundle: Mapped[Optional["IncidentBundle"]] = relationship(
-        back_populates="resolutions"
-    )
+
 
 
 class AgentSession(Base):

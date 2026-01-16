@@ -10,7 +10,14 @@ class IncidentSummary(BaseModel):
     symptoms: Optional[str] = None
     error_signature: Optional[str] = None
     first_ts: Optional[datetime] = None
-    summary: Optional[str] = None  # content or symptoms
+    summary: Optional[str] = None
+    # Actual table fields
+    title: Optional[str] = None
+    status: Optional[str] = None
+    owner: Optional[str] = None
+    tags: Optional[List[str]] = None
+    resolved_at: Optional[datetime] = None
+  # content or symptoms
 
 class IncidentListResponse(BaseModel):
     incidents: List[IncidentSummary]

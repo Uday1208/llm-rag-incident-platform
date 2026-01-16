@@ -18,14 +18,15 @@ def generate_jsonl(limit: int = 1000) -> Generator[str, None, None]:
     
     query = """
         SELECT 
-            ib.id, ib.trace_id, ib.service, ib.severity, 
-            ib.symptoms, ib.error_signature, ib.content,
-            r.summary, r.steps, r.root_cause, r.preventive_action
-        FROM incident_bundles ib
-        JOIN resolutions r ON r.bundle_id = ib.id
-        ORDER BY ib.first_ts DESC
+            i.incident_id, i.incident_id, 'N/A', i.severity, 
+            i.title, '', i.title,
+            ir.summary, ir.actions, '', ''
+        FROM incidents i
+        JOIN incident_resolutions ir ON ir.incident_id = i.incident_id
+        ORDER BY i.started_at DESC
         LIMIT %s
     """
+
     
     try:
         with get_conn() as conn:

@@ -11,6 +11,12 @@ class IncidentSummary(BaseModel):
     error_signature: Optional[str] = None
     first_ts: Optional[datetime] = None
     summary: Optional[str] = None
+    title: Optional[str] = None
+    status: Optional[str] = None
+    owner: Optional[str] = None
+    tags: Optional[List[str]] = None
+    resolved_at: Optional[datetime] = None
+
 
 class IncidentListResponse(BaseModel):
     incidents: List[IncidentSummary]

@@ -71,12 +71,13 @@ def search_by_embedding(query_vec: list[float], top_k: int) -> List[Tuple[str, s
     return [(r[0], r[1], float(r[2]) if r[2] is not None else 0.0) for r in rows]
 
 
-def get_recent_bundles(limit: int = 50) -> List[Tuple]:
-    """Fetch recent incident bundles for the dashboard."""
+def get_recent_incidents(limit: int = 50) -> List[Tuple]:
+    """Fetch recent incidents for the dashboard from the 'incidents' table."""
+    # Mapping columns: incident_id as id, title as symptoms/summary, started_at as first_ts
     sql = """
-    SELECT id, trace_id, service, severity, symptoms, error_signature, first_ts, content
-    FROM incident_bundles
-    ORDER BY first_ts DESC NULLS LAST
+    SELECT incident_id, incident_id, 'N/A', severity, title, '', started_at, title
+    FROM incidents
+    ORDER BY started_at DESC NULLS LAST
     LIMIT %s;
     """
     try:
@@ -86,22 +87,22 @@ def get_recent_bundles(limit: int = 50) -> List[Tuple]:
                 rows = cur.fetchall()
         return rows
     except Exception:
-        # If table doesn't exist or other error, return empty
         return []
 
 
-def get_bundle(bundle_id: str) -> Optional[Tuple]:
-    """Fetch a single incident bundle by ID."""
+def get_incident(incident_id: str) -> Optional[Tuple]:
+    """Fetch a single incident by ID from the 'incidents' table."""
     sql = """
-    SELECT id, trace_id, service, severity, symptoms, error_signature, first_ts, content
-    FROM incident_bundles
-    WHERE id = %s;
+    SELECT incident_id, incident_id, 'N/A', severity, title, '', started_at, title
+    FROM incidents
+    WHERE incident_id = %s;
     """
     try:
         with get_conn() as conn, conn.cursor() as cur:
-            cur.execute(sql, (bundle_id,))
+            cur.execute(sql, (incident_id,))
             return cur.fetchone()
     except Exception:
         return None
+
 
 
