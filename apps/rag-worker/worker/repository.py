@@ -40,6 +40,30 @@ def upsert_documents(rows: Iterable[Tuple[str, str, str, str, list]]) -> int:
         with get_conn() as conn, conn.cursor() as cur:
             cur.executemany(sql, materialized)
             conn.commit()
+def upsert_incidents(rows: Iterable[Tuple]) -> int:
+    """
+    Upsert incidents: (incident_id, title, status, severity, started_at, resolved_at, owner, tags)
+    """
+    sql = """
+    INSERT INTO incidents (incident_id, title, status, severity, started_at, resolved_at, owner, tags)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (incident_id) DO UPDATE
+      SET title      = EXCLUDED.title,
+          status     = EXCLUDED.status,
+          severity   = EXCLUDED.severity,
+          started_at = EXCLUDED.started_at,
+          resolved_at = EXCLUDED.resolved_at,
+          owner      = EXCLUDED.owner,
+          tags       = EXCLUDED.tags;
+    """
+    materialized = list(rows)
+    if not materialized:
+        return 0
+        
+    with DB_TIME.labels(route="upsert_incidents").time():
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.executemany(sql, materialized)
+            conn.commit()
     return len(materialized)
 
 

@@ -5,7 +5,8 @@
 # - Shares regex/heuristics with extract_incident_to_pg_v3.py so behavior matches
 
 from __future__ import annotations
-import re, json
+import re, json, hashlib
+from datetime import datetime, timezone
 from typing import List, Tuple, Optional, Dict, Any
 
 # -------------------------
@@ -97,12 +98,21 @@ def summarize_records(records: List[dict], *, min_level: str = "WARNING") -> Tup
     if not content:
         return [], stats
 
+    source = _guess_source(lines)
     incident = {
-        "source": _guess_source(lines),
+        "id": hashlib.sha1(f"{source}{content}".encode()).hexdigest(),
+        "source": source,
         "severity": severity or "ERROR",
         "content": content,
-        "ts": None,  # we don’t have a reliable per-incident ts at this stage
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "metadata": {
+            "title": content[:100].splitlines()[0] if content else "Unknown Incident",
+            "status": "OPEN",
+            "owner": source,
+        }
     }
+
+
     stats["kept"] = 1
     return [incident], stats
 

@@ -168,7 +168,11 @@ class ProcessingPipeline:
                 "ts": bundle.get("first_ts").isoformat() if bundle.get("first_ts") else None,
                 "content": bundle.get("content"),
                 "severity": bundle.get("severity"),
-                "meta": {
+                "metadata": {
+                    "title": bundle.get("error_signature") or bundle.get("symptoms")[:100] if bundle.get("symptoms") else "Unknown Incident",
+                    "status": "OPEN",
+                    "owner": bundle.get("service"),
+                    "tags": [bundle.get("operation")] if bundle.get("operation") else [],
                     "trace_id": bundle.get("trace_id"),
                     "operation": bundle.get("operation"),
                     "log_count": bundle.get("log_count"),
@@ -179,6 +183,7 @@ class ProcessingPipeline:
                 },
             }
             docs.append(doc)
+
         
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
