@@ -1,8 +1,8 @@
 from fastapi import APIRouter
 from worker.schemas.incidents import IncidentListResponse, IncidentSummary
-from worker.repository import get_recent_bundles
 
 router = APIRouter()
+
 
 @router.get("/incidents", response_model=IncidentListResponse)
 def list_incidents(limit: int = 50):
