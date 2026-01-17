@@ -14,30 +14,35 @@ from worker.schemas.ingest import IngestRequest
 from worker.embeddings import embed_texts
 from worker.repository import upsert_documents, upsert_incidents
 
-def _coerce_severity(doc) -> int | None:
-    """
-    Map incoming fields to severity int 0..5.
-    Accepts: severity (int/str), or level/severity_level strings.
-    Returns None if unknown.
-    """
-    try:
-        if 'severity' in doc and doc['severity'] is not None:
-            s = int(doc['severity'])
-            return max(0, min(5, s))
-    except Exception:
-        pass
+def _map_to_prod_severity(level_or_val: str | int | None) -> str:
+    """Map internal severity to production labels SEV1..SEV4."""
+    if level_or_val is None:
+        return "SEV3"
+    
+    val = str(level_or_val).strip().upper()
+    # Map descriptive names
+    mapping = {
+        "CRITICAL": "SEV1",
+        "FATAL": "SEV1",
+        "ERROR": "SEV2",
+        "WARNING": "SEV3",
+        "WARN": "SEV3",
+        "INFO": "SEV4",
+        "DEBUG": "SEV4",
+        "TRACE": "SEV4",
+        "5": "SEV1",
+        "4": "SEV2",
+        "3": "SEV2",
+        "2": "SEV3",
+        "1": "SEV4",
+        "0": "SEV4",
+    }
+    return mapping.get(val, "SEV3")
 
-    lvl = str(doc.get('level') or doc.get('severity_level') or "").strip().lower()
-    if lvl:
-        table = {
-            "trace": 0, "debug": 0,
-            "info": 1,
-            "warn": 2, "warning": 2,
-            "error": 3,
-            "critical": 4, "fatal": 5,
-        }
-        return table.get(lvl, None)
-    return None
+def _coerce_severity(doc) -> str:
+    """Return mapped production severity (SEV1-4)."""
+    val = doc.get("severity") or doc.get("level") or doc.get("severity_level") or "INFO"
+    return _map_to_prod_severity(val)
 
 router = APIRouter()
 
@@ -68,19 +73,23 @@ async def ingest(req: IngestRequest):
     inc_rows = []
     
     for d, v in zip(raw_docs, vecs):
-        # Severity coercion
-        sev_int = _coerce_severity(d.dict())
-        doc_rows.append((d.id, d.source, d.ts, d.content, sev_int, v))
+        # Severity coercion to SEV labels
+        sev_label = _coerce_severity(d.dict())
+        doc_rows.append((d.id, d.source, d.ts, d.content, sev_label, v))
         
         # Check for incident metadata
         if d.metadata:
             m = d.metadata
+            status = str(m.get("status") or "open").lower()
+            if status not in ["open", "mitigated", "resolved", "closed"]:
+                status = "open"
+                
             # (incident_id, title, status, severity, started_at, resolved_at, owner, tags)
             inc_rows.append((
                 d.id,
                 m.get("title") or m.get("error_signature") or d.source,
-                m.get("status", "OPEN"),
-                d.severity or "INFO",
+                status,
+                sev_label,
                 d.ts,
                 m.get("resolved_at"),
                 m.get("owner") or d.source,

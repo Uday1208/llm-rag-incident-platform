@@ -24,12 +24,11 @@ class Base(DeclarativeBase):
 # =============================================================================
 
 class SeverityLevel:
-    """Severity levels matching Application Insights."""
-    DEBUG = "DEBUG"
-    INFO = "INFO"
-    WARNING = "WARNING"
-    ERROR = "ERROR"
-    CRITICAL = "CRITICAL"
+    """Severity levels matching Production PG constraints."""
+    SEV1 = "SEV1" # Critical
+    SEV2 = "SEV2" # Error
+    SEV3 = "SEV3" # Warning
+    SEV4 = "SEV4" # Info
 
 
 class AgentSessionStatus:

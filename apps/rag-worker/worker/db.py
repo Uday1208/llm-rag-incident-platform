@@ -114,15 +114,49 @@ def _ensure_schema_sync() -> None:
         "CREATE EXTENSION IF NOT EXISTS vector;",
         f"""
         CREATE TABLE IF NOT EXISTS documents (
-          id        TEXT PRIMARY KEY,
-          source    TEXT,
-          ts        TIMESTAMPTZ,
-          content   TEXT NOT NULL,
-          embedding VECTOR({VECTOR_DIM}) NOT NULL
+          id             TEXT PRIMARY KEY,
+          source         TEXT NOT NULL,
+          ts             TIMESTAMPTZ NOT NULL,
+          severity       TEXT,
+          content        TEXT NOT NULL,
+          embedding      VECTOR({VECTOR_DIM}),
+          schema_version INTEGER NOT NULL DEFAULT 2
         );
         """,
-        "CREATE INDEX IF NOT EXISTS idx_documents_embedding "
-        "ON documents USING ivfflat (embedding vector_cosine_ops);",
+        """
+        CREATE TABLE IF NOT EXISTS incidents (
+          incident_id TEXT PRIMARY KEY,
+          title       TEXT NOT NULL,
+          status      TEXT NOT NULL CHECK (status = ANY (ARRAY['open', 'mitigated', 'resolved', 'closed'])),
+          severity    TEXT CHECK (severity = ANY (ARRAY['SEV1', 'SEV2', 'SEV3', 'SEV4'])),
+          started_at  TIMESTAMPTZ NOT NULL,
+          resolved_at TIMESTAMPTZ,
+          owner       TEXT,
+          tags        TEXT[],
+          created_by  TEXT,
+          updated_by  TEXT,
+          created_at  TIMESTAMPTZ DEFAULT now(),
+          updated_at  TIMESTAMPTZ DEFAULT now()
+        );
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS incident_resolutions (
+          resolution_id  TEXT PRIMARY KEY,
+          incident_id    TEXT REFERENCES incidents(incident_id) ON DELETE CASCADE,
+          summary        TEXT NOT NULL,
+          actions        TEXT[],
+          verification   TEXT,
+          outcome        TEXT CHECK (outcome = ANY (ARRAY['effective', 'partial', 'ineffective'])),
+          embedding      VECTOR({VECTOR_DIM}),
+          confidence     NUMERIC,
+          linked_doc_ids TEXT[],
+          created_by     TEXT,
+          created_at     TIMESTAMPTZ DEFAULT now()
+        );
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_documents_embedding ON documents USING ivfflat (embedding vector_cosine_ops);",
+        "CREATE INDEX IF NOT EXISTS idx_docs_source_ts ON documents (source, ts DESC);",
+        "CREATE INDEX IF NOT EXISTS idx_inc_res_embedding ON incident_resolutions USING ivfflat (embedding vector_cosine_ops);",
     ]
     with DB_TIME.labels(route="schema").time():
         with get_conn() as conn, conn.cursor() as cur:
