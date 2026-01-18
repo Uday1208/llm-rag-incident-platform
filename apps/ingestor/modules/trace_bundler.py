@@ -364,9 +364,16 @@ class BatchTraceBundler:
                 first_ts = valid_ts.min()
                 last_ts = valid_ts.max()
         
-        # Format content
-        content = self._format_content(logs_df)
-        
+        # Extract Propagation Flow: unique sequence of services in chronological order
+        propagation = []
+        if "service" in logs_df.columns:
+            # Drop NA and get the sequence
+            sequence = logs_df["service"].dropna().tolist()
+            # Remove consecutive duplicates to show the "hops"
+            for s in sequence:
+                if not propagation or propagation[-1] != s:
+                    propagation.append(s)
+
         # Generate ID
         id_input = f"{trace_id}:{service}:{first_ts.isoformat() if first_ts else 'no-ts'}"
         bundle_id = hashlib.sha256(id_input.encode()).hexdigest()[:32]
@@ -382,6 +389,7 @@ class BatchTraceBundler:
             "first_ts": first_ts,
             "last_ts": last_ts,
             "raw_line_range": line_range,
+            "propagation": propagation,
         }
     
     def _format_content(self, logs_df: pd.DataFrame) -> str:
