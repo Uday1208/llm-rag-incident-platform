@@ -374,6 +374,9 @@ class BatchTraceBundler:
                 if not propagation or propagation[-1] != s:
                     propagation.append(s)
 
+        # Format content
+        content = self._format_content(logs_df)
+
         # Generate ID
         id_input = f"{trace_id}:{service}:{first_ts.isoformat() if first_ts else 'no-ts'}"
         bundle_id = hashlib.sha256(id_input.encode()).hexdigest()[:32]
