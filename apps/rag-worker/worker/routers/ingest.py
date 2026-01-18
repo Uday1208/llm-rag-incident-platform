@@ -7,6 +7,7 @@ Notes:
 - Sanitizes inputs so embedder never receives None/empty strings.
 """
 
+import json
 from typing import List, Tuple
 from fastapi import APIRouter, HTTPException
 
@@ -93,7 +94,8 @@ async def ingest(req: IngestRequest):
                 d.ts,
                 m.get("resolved_at"),
                 m.get("owner") or d.source,
-                m.get("tags", [])
+                m.get("tags", []),
+                json.dumps(m.get("propagation", []))
             ))
 
     doc_count = upsert_documents(doc_rows)

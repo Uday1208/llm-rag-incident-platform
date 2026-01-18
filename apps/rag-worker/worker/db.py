@@ -133,6 +133,7 @@ def _ensure_schema_sync() -> None:
           resolved_at TIMESTAMPTZ,
           owner       TEXT,
           tags        TEXT[],
+          propagation JSONB DEFAULT '[]'::jsonb,
           created_by  TEXT,
           updated_by  TEXT,
           created_at  TIMESTAMPTZ DEFAULT now(),

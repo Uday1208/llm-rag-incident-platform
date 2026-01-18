@@ -10,7 +10,7 @@ def list_incidents(limit: int = 50):
     from worker.repository import get_recent_incidents
     # Row query: incident_id, title, status, severity, started_at, resolved_at, owner, tags
     sql = """
-    SELECT incident_id, title, status, severity, started_at, resolved_at, owner, tags
+    SELECT incident_id, title, status, severity, started_at, resolved_at, owner, tags, propagation
     FROM incidents
     ORDER BY started_at DESC NULLS LAST
     LIMIT %s;
@@ -37,7 +37,8 @@ def list_incidents(limit: int = 50):
             status=r[2],
             resolved_at=r[5],
             owner=r[6],
-            tags=r[7]
+            tags=r[7],
+            propagation=r[8] if r[8] is not None else []
         ))
     return IncidentListResponse(incidents=incidents)
 
@@ -48,7 +49,7 @@ def get_incident(incident_id: str):
     from fastapi import HTTPException
     
     sql = """
-    SELECT incident_id, title, status, severity, started_at, resolved_at, owner, tags
+    SELECT incident_id, title, status, severity, started_at, resolved_at, owner, tags, propagation
     FROM incidents
     WHERE incident_id = %s;
     """
@@ -73,7 +74,8 @@ def get_incident(incident_id: str):
         status=r[2],
         resolved_at=r[5],
         owner=r[6],
-        tags=r[7]
+        tags=r[7],
+        propagation=r[8] if r[8] is not None else []
     )
 
 

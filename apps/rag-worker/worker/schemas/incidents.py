@@ -17,6 +17,7 @@ class IncidentSummary(BaseModel):
     owner: Optional[str] = None
     tags: Optional[List[str]] = None
     resolved_at: Optional[datetime] = None
+    propagation: Optional[List[str]] = []
   # content or symptoms
 
 class IncidentListResponse(BaseModel):

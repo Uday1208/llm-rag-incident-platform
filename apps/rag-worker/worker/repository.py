@@ -45,8 +45,8 @@ def upsert_incidents(rows: Iterable[Tuple]) -> int:
     Upsert incidents: (incident_id, title, status, severity, started_at, resolved_at, owner, tags)
     """
     sql = """
-    INSERT INTO incidents (incident_id, title, status, severity, started_at, resolved_at, owner, tags)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    INSERT INTO incidents (incident_id, title, status, severity, started_at, resolved_at, owner, tags, propagation)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (incident_id) DO UPDATE
       SET title      = EXCLUDED.title,
           status     = EXCLUDED.status,
@@ -54,7 +54,8 @@ def upsert_incidents(rows: Iterable[Tuple]) -> int:
           started_at = EXCLUDED.started_at,
           resolved_at = EXCLUDED.resolved_at,
           owner      = EXCLUDED.owner,
-          tags       = EXCLUDED.tags;
+          tags       = EXCLUDED.tags,
+          propagation = EXCLUDED.propagation;
     """
     materialized = list(rows)
     if not materialized:
@@ -99,7 +100,7 @@ def get_recent_incidents(limit: int = 50) -> List[Tuple]:
     """Fetch recent incidents for the dashboard from the 'incidents' table."""
     # Mapping columns: incident_id as id, title as symptoms/summary, started_at as first_ts
     sql = """
-    SELECT incident_id, incident_id, 'N/A', severity, title, '', started_at, title
+    SELECT incident_id, incident_id, 'N/A', severity, title, '', started_at, title, propagation
     FROM incidents
     ORDER BY started_at DESC NULLS LAST
     LIMIT %s;
@@ -117,7 +118,7 @@ def get_recent_incidents(limit: int = 50) -> List[Tuple]:
 def get_incident(incident_id: str) -> Optional[Tuple]:
     """Fetch a single incident by ID from the 'incidents' table."""
     sql = """
-    SELECT incident_id, incident_id, 'N/A', severity, title, '', started_at, title
+    SELECT incident_id, incident_id, 'N/A', severity, title, '', started_at, title, propagation
     FROM incidents
     WHERE incident_id = %s;
     """
