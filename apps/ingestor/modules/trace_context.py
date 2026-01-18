@@ -36,9 +36,9 @@ SPAN_ID_KEYS = (
     "otelSpanId",          # OpenTelemetry custom injection
 )
 
-# Service identification
 SERVICE_KEYS = (
     "cloud_RoleName",      # App Insights standard (best)
+    "service",             # Custom injection
     "appName",             # Alternative
     "serviceName",         # OpenTelemetry
     "ContainerAppName",    # Azure Container Apps
