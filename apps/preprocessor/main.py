@@ -45,6 +45,7 @@ class TraceIdFilter(logging.Filter):
         ctx = span.get_span_context()
         record.otelTraceId = format(ctx.trace_id, '032x') if ctx.is_valid else "0"
         record.otelSpanId = format(ctx.span_id, '016x') if ctx.is_valid else "0"
+        record.service = "preprocessor"
         return True
 
 def configure_logging():
@@ -52,7 +53,7 @@ def configure_logging():
     logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
     handler = logging.StreamHandler()
     formatter = jsonlogger.JsonFormatter(
-        "%(asctime)s %(levelname)s %(name)s %(message)s %(otelTraceId)s %(otelSpanId)s"
+        "%(asctime)s %(levelname)s %(name)s %(message)s %(otelTraceId)s %(otelSpanId)s %(service)s"
     )
     handler.setFormatter(formatter)
     handler.addFilter(TraceIdFilter())
@@ -105,12 +106,17 @@ def setup_scheduler(pipeline: ProcessingPipeline, cron: str):
     _scheduler = AsyncIOScheduler()
     
     async def scheduled_job():
-        log.info("Scheduled processing started")
-        try:
-            stats = await pipeline.process_unprocessed()
-            log.info(f"Scheduled processing complete: {stats}")
-        except Exception as e:
-            log.error(f"Scheduled processing failed: {e}")
+        tracer = trace.get_tracer(__name__)
+        with tracer.start_as_current_span("scheduled_job") as span:
+            log.info("Scheduled processing started")
+            try:
+                stats = await pipeline.process_unprocessed()
+                log.info(f"Scheduled processing complete: {stats}")
+                span.set_attribute("stats", str(stats))
+            except Exception as e:
+                log.error(f"Scheduled processing failed: {e}")
+                span.record_exception(e)
+                span.set_status(trace.Status(trace.StatusCode.ERROR))
     
     # Parse cron expression (minute hour day month day_of_week)
     parts = cron.split()

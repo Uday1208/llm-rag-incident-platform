@@ -15,6 +15,7 @@ from datetime import datetime
 
 import httpx
 import pandas as pd
+from opentelemetry import propagate
 
 # Import from sibling ingestor modules
 import sys
@@ -169,7 +170,7 @@ class ProcessingPipeline:
                 "content": bundle.get("content"),
                 "severity": bundle.get("severity"),
                 "metadata": {
-                    "title": bundle.get("error_signature") or bundle.get("symptoms")[:100] if bundle.get("symptoms") else "Unknown Incident",
+                    "title": bundle.get("error_signature") or (bundle.get("symptoms")[:100] if bundle.get("symptoms") else None) or f"Issue in {bundle.get('service', 'unknown')}",
                     "status": "OPEN",
                     "owner": bundle.get("service"),
                     "tags": [bundle.get("operation")] if bundle.get("operation") else [],
@@ -187,6 +188,9 @@ class ProcessingPipeline:
 
         
         try:
+            # Inject trace context into headers
+            propagate.inject(headers)
+            
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(url, headers=headers, json={"documents": docs})
                 response.raise_for_status()

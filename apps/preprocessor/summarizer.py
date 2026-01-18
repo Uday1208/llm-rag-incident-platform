@@ -82,13 +82,9 @@ class IncidentSummarizer:
                 }
             
         except Exception as e:
-            # Soft fail: If LLM summary fails, log and return empty summary
+            # Soft fail: If LLM summary fails, log and use rule-based fallback
             log.warning(f"LLM summarization (via agent) failed: {repr(e)}")
-            return {
-                "symptoms": None,
-                "failing_dependency": None,
-                "error_signature": None
-            }
+            return self._fallback_summary(bundle)
     
     def _fallback_summary(self, bundle: Dict[str, Any]) -> Dict[str, Optional[str]]:
         """Generate fallback summary from bundle content."""
