@@ -15,6 +15,7 @@ class TraceIdFilter(logging.Filter):
         ctx = span.get_span_context()
         record.otelTraceId = format(ctx.trace_id, '032x') if ctx.is_valid else "0"
         record.otelSpanId = format(ctx.span_id, '016x') if ctx.is_valid else "0"
+        record.service = "rag-worker"
         return True
 
 def configure_logging() -> None:
@@ -23,7 +24,7 @@ def configure_logging() -> None:
     logger.setLevel(settings.LOG_LEVEL)
     handler = logging.StreamHandler()
     formatter = jsonlogger.JsonFormatter(
-        "%(asctime)s %(levelname)s %(name)s %(message)s %(otelTraceId)s %(otelSpanId)s"
+        "%(asctime)s %(levelname)s %(name)s %(message)s %(otelTraceId)s %(otelSpanId)s %(service)s"
     )
     handler.setFormatter(formatter)
     handler.addFilter(TraceIdFilter())
