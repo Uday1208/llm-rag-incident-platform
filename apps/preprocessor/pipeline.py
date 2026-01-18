@@ -180,6 +180,7 @@ class ProcessingPipeline:
                     "failing_dependency": bundle.get("failing_dependency"),
                     "error_signature": bundle.get("error_signature"),
                     "raw_blob_path": bundle.get("raw_blob_path"),
+                    "propagation": bundle.get("propagation", []),
                 },
             }
             docs.append(doc)
